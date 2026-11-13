@@ -24,6 +24,8 @@ const { spawn, execFileSync } = require('child_process');
 
 const BASE = process.env.IMI_ROOT || __dirname;
 const CONFIG = process.env.IMI_CONFIG || path.join(BASE, 'go2rtc.yaml');
+// 引擎的 PatchConfig 也写 <config>.tmp：助手带上 PID，避免两个进程抢同一个临时文件
+const TMP_CONFIG = `${CONFIG}.${process.pid}.tmp`;
 const EXE = process.env.IMI_GO2RTC_BIN || path.join(BASE, 'go2rtc.exe');
 const LOG_DIR = process.env.IMI_LOG_DIR || BASE;
 const HELPER_LOG = path.join(LOG_DIR, 'qr-login.log');
@@ -54,7 +56,7 @@ function migrateLegacyApiPort() {
     const text = fs.readFileSync(CONFIG, 'utf8');
     if (!/listen:\s*"127\.0\.0\.1:1984"/.test(text)) return;
     const next = text.replace(/listen:\s*"127\.0\.0\.1:1984"/, 'listen: "127.0.0.1:19840"');
-    const tmp = CONFIG + '.tmp';
+    const tmp = TMP_CONFIG;
     fs.writeFileSync(tmp, next, { encoding: 'utf8', mode: 0o600 });
     fs.renameSync(tmp, CONFIG);
   } catch {}
@@ -321,7 +323,7 @@ function saveToken(user, cred) {
     removeNestedEntry(lines, /^xiaomi-credentials:\s*(?:#.*)?$/, user);
   }
 
-  const tmp = CONFIG + '.tmp';
+  const tmp = TMP_CONFIG;
   fs.writeFileSync(tmp, lines.join(eol), { encoding: 'utf8', mode: 0o600 });
   fs.renameSync(tmp, CONFIG);
   if (process.platform !== 'win32') {
@@ -666,7 +668,7 @@ function persistRefreshedToken(user, configToken, auth, authToken) {
       ([k, v]) => `  ${JSON.stringify(k)}: ${JSON.stringify(v)}`
     )];
     lines.splice(start, end - start, ...block);
-    const tmp = CONFIG + '.tmp';
+    const tmp = TMP_CONFIG;
     fs.writeFileSync(tmp, lines.join(eol), { encoding: 'utf8', mode: 0o600 });
     fs.renameSync(tmp, CONFIG);
     if (process.platform !== 'win32') {

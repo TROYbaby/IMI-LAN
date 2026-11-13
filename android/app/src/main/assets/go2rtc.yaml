@@ -1,0 +1,23 @@
+# IMI-LAN 安卓版配置模板（首次启动自动生成，端口随机）
+# 与桌面版格式一致，可直接复制 go2rtc.yaml 过来。
+api:
+  listen: "127.0.0.1:__API_PORT__"
+  # 127.0.0.1 是所有应用共享的：必须认证，否则同机任意 App 都能读走 xiaomi-credentials
+  local_auth: true
+  username: "imi"
+  password: "__API_PASSWORD__"
+
+rtsp:
+  listen: "127.0.0.1:__RTSP_PORT__"
+
+webrtc:
+  listen: "127.0.0.1:__WEBRTC_PORT__"
+
+log:
+  level: info
+
+# 登录令牌：扫码成功后由内置助手写入（xiaomi / xiaomi-credentials）
+xiaomi:
+
+# 摄像头流地址由网页里的「添加摄像头」写入
+streams:

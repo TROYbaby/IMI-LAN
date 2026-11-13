@@ -39,6 +39,7 @@ Windows 用户直接下载 [Releases](https://github.com/pigstrong9/IMI-LAN/rele
 - 若防火墙拦截，右键安装目录里的 `修复网络权限（桌面版）.bat` → 以管理员身份运行，然后从托盘菜单「重启引擎」。
 - 安装包不含任何账号信息，安装时生成空白 `go2rtc.yaml`；令牌只在扫码后写入本机。按许可证要求未附带 GPL 构建的 `bin/ffmpeg.exe`，H.265 依赖浏览器 / 系统原生解码。
 - fnOS（飞牛）用户请在同一个 Release 下载 `imi-lan_1.0.1_x86.fpk`；`SHA256SUMS.txt` 用于校验。
+- 安卓手机 / 平板可侧载 `imi-lan_1.0.1_arm64_debug.apk`（arm64 真机；模拟器用 `x86_64`），无需电脑或飞牛，安装时允许「未知来源」即可；构建与限制见 [android/README.md](android/README.md)。
 - exe 未签名，Windows SmartScreen 可能提示「更多信息 → 仍要运行」。
 
 > 下面「从源码运行」「第一次使用（源码版）」等章节面向开发者和想自行构建的人。普通用户到这一步就可以开始用了。
@@ -117,7 +118,8 @@ Windows 桌面版从 [Releases](https://github.com/pigstrong9/IMI-LAN/releases) 
 
 `android/` 提供本机独立版 APK：go2rtc、网关和扫码登录全部跑在手机里，不需要电脑或飞牛，也不用装 Node。打开 App 就是和桌面版一样的网页界面。
 
-- 只监听 `127.0.0.1:19841`，用同源 Cookie 里的随机令牌认证，同机其他应用读不到小米 token；
+- 只监听 `127.0.0.1:19841`，用同源 Cookie 里的随机令牌认证，同机其他应用读不到小米 token；go2rtc API 另开 `local_auth`，网关反代时自动带 Basic Auth；
+- RTSP 仍监听在回环随机端口且免认证，同机其他应用可拉到视频流（拿不到云端 token），详见 [android/README.md](android/README.md)；
 - 扫码登录由 Go 版助手完成，扫码成功后网络可断开，局域网观看不经过云端；
 - 截图 / 录像保存到相册的 `Pictures/IMI-LAN`、`Movies/IMI-LAN`；
 - 安卓 WebView 对 H.265 支持参差，默认走「流畅」子码流（导入时即落子码流），可在卡片上手动切「高清」；

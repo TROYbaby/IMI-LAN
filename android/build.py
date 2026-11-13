@@ -22,6 +22,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import os
 import re
@@ -66,16 +67,19 @@ def load_fpk_build():
 
 
 def ensure_source(fpk) -> Path:
-    """Download, extract and patch go2rtc once; reuse the patched tree."""
+    """Download, extract and patch go2rtc once; redo it when the patch file changes."""
+    patch = ROOT / "fpk" / "patches" / "xiaomi-login.patch"
+    patch_hash = hashlib.sha256(patch.read_bytes()).hexdigest()
     src = fpk.BUILD / f"go2rtc-{fpk.GO2RTC_VERSION}" / f"go2rtc-{fpk.GO2RTC_VERSION}"
     marker = src / ".imi-patched"
-    if marker.is_file():
+    # 只判断标记存在会让补丁更新后继续复用旧树；标记里记补丁哈希
+    if marker.is_file() and marker.read_text(encoding="utf-8").strip() == patch_hash:
         info(f"reusing patched go2rtc source: {src}")
         return src
     tar = fpk.download_source()
     src = fpk.extract_source(tar)
     fpk.apply_patch(src)
-    marker.write_text("patched by android/build.py\n", encoding="utf-8")
+    marker.write_text(patch_hash + "\n", encoding="utf-8")
     return src
 
 
@@ -180,6 +184,19 @@ def run_gradle(gradle: str, sdk: str, jdk: str | None, tasks: list[str],
         die(f"gradle {' '.join(tasks)} failed")
 
 
+def warn_release_signing() -> None:
+    """--release 但没配置签名时 Gradle 会退回 debug 签名，产物无法被正式包覆盖安装。"""
+    if (ANDROID / "keystore.properties").is_file():
+        return
+    print(
+        "[android] WARNING: --release 但没有 android/keystore.properties，"
+        "Gradle 会退回 debug 签名。\n"
+        "[android] WARNING: 这样的包以后无法被正式签名的版本覆盖安装，只能卸载重装。",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def collect_apks(build_type: str, abis: list[str], version: str) -> list[Path]:
     out_dir = APP / "build" / "outputs" / "apk" / build_type
     if not out_dir.is_dir():
@@ -198,6 +215,10 @@ def collect_apks(build_type: str, abis: list[str], version: str) -> list[Path]:
         target = DIST / f"imi-lan_{version}_{abi.replace('-v8a', '')}_{suffix}.apk"
         shutil.copy2(match[0], target)
         verify_apk(target, abi)
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        (target.with_suffix(target.suffix + ".sha256")).write_text(
+            f"{digest}  {target.name}\n", encoding="utf-8")
+        info(f"sha256 {digest}")
         results.append(target)
     return results
 
@@ -260,6 +281,8 @@ def main() -> None:
 
     gradle = find_gradle(args.gradle)
     build_type = "release" if args.release else "debug"
+    if args.release:
+        warn_release_signing()
     tasks = [f"assemble{build_type.capitalize()}"]
     if not args.no_clean:
         # Gradle 增量打包会在 APK 里留下上一次的填充；clean 后体积才正常。

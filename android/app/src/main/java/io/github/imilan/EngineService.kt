@@ -67,15 +67,18 @@ class EngineService : Service() {
         when (intent?.action) {
             ACTION_STOP -> {
                 handler.removeCallbacks(watchdog)
-                Engine.stop()
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
+                // kill() 对每个进程最多等 3 秒，两个进程 6 秒会触发 ANR：放后台线程
+                thread(name = "engine-stop") {
+                    worker?.interrupt()
+                    Engine.stop()
+                    handler.post {
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        stopSelf()
+                    }
+                }
                 return START_NOT_STICKY
             }
-            ACTION_RESTART -> {
-                Engine.stop()
-                runEngine()
-            }
+            ACTION_RESTART -> runEngine(stopFirst = true)
             else -> {
                 if (!Engine.isReady() && Engine.state != Engine.State.STARTING) runEngine()
             }
@@ -88,16 +91,21 @@ class EngineService : Service() {
 
     override fun onDestroy() {
         handler.removeCallbacks(watchdog)
-        Engine.stop()
+        // 同样不能在主线程等进程退出
+        thread(name = "engine-destroy") {
+            worker?.interrupt()
+            Engine.stop()
+        }
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun runEngine() {
+    private fun runEngine(stopFirst: Boolean = false) {
         lastAttempt = System.currentTimeMillis()
         worker?.interrupt()
         worker = thread(name = "engine-start") {
+            if (stopFirst) Engine.stop()
             Engine.start(applicationContext)
             handler.post {
                 updateNotification()

@@ -6,7 +6,8 @@
 
 - `go2rtc` 与网关用 Go 交叉编译成 Linux ARM64 / x86_64 二进制，以 `libgo2rtc.so` / `libimi-gateway.so` 的名字放进 `jniLibs`。Android 只有 `nativeLibraryDir` 允许应用直接执行文件，所以必须用 `useLegacyPackaging = true` + `extractNativeLibs="true"`。
 - 启动时前台服务把两个进程拉起来，网页网关固定在 `127.0.0.1:19841`，go2rtc API 端口首次启动时在 20000–29999 里随机挑一个写进 `go2rtc.yaml`。
-- 网关带 `-app-token`，WebView 通过 `CookieManager` 写入 `imi_app=<随机令牌>`；API 只经网关代理，同机其他应用无法直接读取小米 token。`/health` 仍然免令牌，方便系统探测。
+- Android 的 `127.0.0.1` 是所有应用共享的，所以 go2rtc 模板默认开 `api.local_auth: true`，账号 `imi`、密码首次启动随机生成（存在 App 私有 prefs）。网关反代 `/api` 时自动注入 Basic Auth，网页和扫码助手都感知不到。
+- 网关带 `-app-token`，WebView 通过 `CookieManager` 写入 `imi_app=<随机令牌>`；API 只经网关代理，同机其他应用拿不到小米 token。`/health` 仍然免令牌，方便系统探测。
 - 扫码登录由 `fpk/gateway/qr.go` 完成（从 `qr-login.js` 移植），不需要 Node。
 - 安卓没有 `/etc/resolv.conf`，`Engine` 从 `ConnectivityManager` 读出当前 DNS，用 `IMI_DNS` 环境变量传给引擎；同时用 APK 内置的 `ca.pem` 作为 `SSL_CERT_FILE`，否则 Go 的 x509 找不到系统根证书。
 - 截图 / 录像不再用 `<a download>`（WebView 不触发下载），而是经 `IMIAndroid` JS 桥分块 base64 写入系统相册的 `Pictures/IMI-LAN`、`Movies/IMI-LAN`。
@@ -34,7 +35,7 @@ python android/build.py --release
 
 脚本会：
 
-1. 复用/生成 `fpk/.build` 里已打补丁的 go2rtc 源码；
+1. 复用/生成 `fpk/.build` 里已打补丁的 go2rtc 源码（标记文件记录补丁 sha256，`fpk/patches/xiaomi-login.patch` 改动后会自动重新解包打补丁）；
 2. 交叉编译两个 ABI 的引擎与网关，做 ELF 架构校验；
 3. 把 `web/` 复制到 `app/src/main/assets/web`；
 4. 写 `local.properties` 并调用 Gradle（默认先 `clean`，否则增量打包会在 APK 里留下旧填充，体积越滚越大）；
@@ -53,7 +54,7 @@ keyAlias=imi-lan
 keyPassword=...
 ```
 
-没有这个文件时 `--release` 会用 debug 签名，只能自己装。
+没有这个文件时 `--release` 会退回 debug 签名，`build.py` 会打印醒目警告：这种包以后无法被正式签名的版本覆盖安装，只能卸载重装（配置和令牌都会丢）。
 
 ## 安装与使用
 
@@ -79,9 +80,9 @@ adb install -r android/dist/imi-lan_1.0.1_arm64_debug.apk
 | 配置（含小米令牌） | `/data/data/io.github.imilan/files/engine/go2rtc.yaml` |
 | 网页资源 | `/data/data/io.github.imilan/files/engine/web/` |
 | 日志 | `/data/data/io.github.imilan/files/engine/engine.log`、`gateway.log` |
-| 网页 / API 网关 | `127.0.0.1:19841`（仅本机，固定） |
-| go2rtc API | `127.0.0.1:20000–29999`（首次启动随机，仅本机） |
-| RTSP / WebRTC | `127.0.0.1:20000–29999`（首次启动随机，仅本机） |
+| 网页 / API 网关 | `127.0.0.1:19841`（仅本机，固定，`imi_app` 令牌） |
+| go2rtc API | `127.0.0.1:20000–29999`（首次启动随机，仅本机，强制 Basic Auth） |
+| RTSP / WebRTC | `127.0.0.1:20000–29999`（首次启动随机，仅本机，无认证） |
 
 卸载 App 会连同令牌和配置一起删除。想保留配置可以先在网页里重新扫码，或把 `go2rtc.yaml` 拷出来（需要 root 或 `adb backup` 之外的手段，`allowBackup=false`）。
 
@@ -90,6 +91,7 @@ adb install -r android/dist/imi-lan_1.0.1_arm64_debug.apk
 - 只支持 arm64-v8a（绝大多数手机/平板）和 x86_64（模拟器）。armeabi-v7a 不提供，Go 的 WebRTC 依赖在 32 位 ARM 上不稳。
 - 不内置 ffmpeg：H.265 主码流在部分设备上解不出来时，请用「流畅」子码流（默认已经是）。若摄像头没有子码流，只能换设备或等后续版本。
 - 与桌面版共用配置格式，但数据各自独立；把桌面版 `go2rtc.yaml` 拷到手机上没有直接入口，建议重新扫码导入。
+- **RTSP 是残留风险**：go2rtc 的 RTSP 对回环地址同样免认证，而安卓只把 RTSP 放在 127.0.0.1 的随机端口上。同机其他应用扫到端口就能拉到摄像头流（拿不到云端 token）。安卓上网页走 WebRTC，不依赖 RTSP；如果威胁模型包含同机恶意应用，后续版本会改成 unix socket 或直接关掉 RTSP。
 - 侧载分发，未上架 Google Play。Android 15+ 前台服务类型用 `connectedDevice`，不需要定位/蓝牙权限。
 - 首次启动需要联网访问 `account.xiaomi.com` 扫码；局域网观看本身不经过云端。
 

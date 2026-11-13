@@ -52,18 +52,23 @@ var (
 type qrService struct {
 	configPath string
 	apiBase    string
+	apiUser    string
+	apiPass    string
 	logPath    string
 
 	sessionMu sync.Mutex
 	session   *qrSession
 
+	// 配置写入串行化：tmp 名带 PID 只防跨进程，同进程内也要避免互相覆盖
+	writeMu sync.Mutex
+
 	locks sync.Map // key -> *sync.Mutex，防止同一账号并发登录
 
-	roomsMu   sync.Mutex
-	roomsKey  string
-	roomsAt   time.Time
-	roomsData *roomsData
-	roomsFail string
+	roomsMu     sync.Mutex
+	roomsKey    string
+	roomsAt     time.Time
+	roomsData   *roomsData
+	roomsFail   string
 	roomsFailAt time.Time
 
 	authKey   string
@@ -72,8 +77,23 @@ type qrService struct {
 	authToken string
 }
 
-func newQRService(configPath, apiBase, logPath string) *qrService {
-	return &qrService{configPath: configPath, apiBase: strings.TrimRight(apiBase, "/"), logPath: logPath}
+func newQRService(configPath, apiBase, apiUser, apiPass, logPath string) *qrService {
+	return &qrService{
+		configPath: configPath,
+		apiBase:    strings.TrimRight(apiBase, "/"),
+		apiUser:    apiUser,
+		apiPass:    apiPass,
+		logPath:    logPath,
+	}
+}
+
+// apiClient 访问 go2rtc API。安卓版 go2rtc 开了 local_auth，回环地址也要 Basic Auth。
+func (s *qrService) apiClient(timeout time.Duration) *http.Client {
+	c := &http.Client{Timeout: timeout}
+	if s.apiUser != "" || s.apiPass != "" {
+		c.Transport = basicAuthTransport{user: s.apiUser, pass: s.apiPass, base: http.DefaultTransport}
+	}
+	return c
 }
 
 func (s *qrService) infof(format string, args ...any) {
@@ -729,7 +749,10 @@ func removeNestedEntry(lines []string, header *regexp.Regexp, user string) []str
 }
 
 func (s *qrService) writeConfig(lines []string, eol string) error {
-	tmp := s.configPath + ".tmp"
+	// 临时文件名带上 PID：go2rtc 自己回写配置时也用 <config>.tmp
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	tmp := fmt.Sprintf("%s.%d.tmp", s.configPath, os.Getpid())
 	if err := os.WriteFile(tmp, []byte(strings.Join(lines, eol)), 0o600); err != nil {
 		return err
 	}
@@ -775,7 +798,10 @@ func (s *qrService) saveToken(user string, cred credential) error {
 	s.roomsMu.Lock()
 	s.roomsKey, s.roomsData, s.roomsFail = "", nil, ""
 	s.roomsMu.Unlock()
-	s.authKey, s.auth, s.authToken, s.authAt = "", nil, "", time.Time{}
+	// 与 getAuth 的读写用同一把账号锁，避免数据竞争
+	s.withLock("login:"+user, func() {
+		s.authKey, s.auth, s.authToken, s.authAt = "", nil, "", time.Time{}
+	})
 	s.infof("token saved for %s", maskUID(user))
 	return nil
 }
@@ -884,7 +910,7 @@ func (s *qrService) persistRefreshedToken(user, configToken string, auth *cloudA
 // ---------------------------------------------------------------- 小米云端
 
 type cloudAuth struct {
-	session  *httpSession
+	session   *httpSession
 	ssecurity []byte
 }
 
@@ -1081,13 +1107,13 @@ func (s *qrService) authFromCredentials(user string) *cloudAuth {
 
 // getAuth 返回账号的云端会话；同一账号的登录只跑一次。
 func (s *qrService) getAuth(user, token string, force bool) (*cloudAuth, string, error) {
-	if force && s.authKey == user {
-		s.authKey, s.auth, s.authToken, s.authAt = "", nil, "", time.Time{}
-	}
 	var auth *cloudAuth
 	var authToken string
 	var authErr error
 	s.withLock("login:"+user, func() {
+		if force && s.authKey == user {
+			s.authKey, s.auth, s.authToken, s.authAt = "", nil, "", time.Time{}
+		}
 		if s.auth != nil && s.authKey == user && time.Since(s.authAt) < 10*time.Minute {
 			auth, authToken = s.auth, s.authToken
 			return
@@ -1333,12 +1359,12 @@ func (s *qrService) restartEngine() bool {
 	s.infof("restarting go2rtc via api")
 	req, err := http.NewRequest("POST", s.apiBase+"/api/restart", nil)
 	if err == nil {
-		if res, derr := (&http.Client{Timeout: 3 * time.Second}).Do(req); derr == nil {
+		if res, derr := s.apiClient(3 * time.Second).Do(req); derr == nil {
 			_, _ = io.Copy(io.Discard, res.Body)
 			_ = res.Body.Close()
 		}
 	}
-	client := &http.Client{Timeout: 1500 * time.Millisecond}
+	client := s.apiClient(1500 * time.Millisecond)
 	for i := 0; i < 60; i++ {
 		res, derr := client.Get(s.apiBase + "/api")
 		if derr == nil {

@@ -29,6 +29,7 @@ object Engine {
     private const val PREFS = "engine"
     private const val API_MIN = 20000
     private const val API_MAX = 29999
+    private const val API_USER = "imi"
     @Volatile
     var state = State.STOPPED
         private set
@@ -64,9 +65,9 @@ object Engine {
         return try {
             val dir = prepare(ctx)
             val cfg = File(dir, "go2rtc.yaml")
-            val port = readApiPort(cfg)
-            if (port <= 0) throw IOException("go2rtc.yaml 里没有 api.listen")
-            apiPort = port
+            val apiPass = ensureApiPass(ctx)
+            ensureApiAuth(cfg, apiPass)
+            if (readApiPort(cfg) <= 0) throw IOException("go2rtc.yaml 里没有 api.listen")
             token = ensureToken(ctx)
 
             val env = buildEnv(ctx, dir)
@@ -79,13 +80,17 @@ object Engine {
             rotateLog(File(dir, "engine.log"))
             rotateLog(File(dir, "gateway.log"))
 
-            engine = spawn(
-                engineBin, listOf("-config", cfg.absolutePath),
-                File(dir, "engine.log"), dir, env,
-            )
-            if (!waitPort(port, 20000) || engine?.isAlive != true) {
-                throw IOException("go2rtc 未能在 20 秒内监听 127.0.0.1:$port")
+            killOrphans(ctx)
+            var port = launch(ctx, engineBin, cfg, dir, env, 20000)
+            if (port <= 0) {
+                // 端口被残留进程或同机其他应用占用时，换一组端口再试一次
+                rewritePorts(cfg)
+                port = launch(ctx, engineBin, cfg, dir, env, 15000)
             }
+            if (port <= 0) {
+                throw IOException("go2rtc 未能在 20 秒内监听 127.0.0.1（端口可能被占用）")
+            }
+            apiPort = port
 
             val instance = randomHex(8)
             gateway = spawn(
@@ -93,6 +98,8 @@ object Engine {
                     "-listen", "127.0.0.1:$WEB_PORT",
                     "-static", File(dir, "web").absolutePath,
                     "-go2rtc", "http://127.0.0.1:$port",
+                    "-go2rtc-user", API_USER,
+                    "-go2rtc-pass", apiPass,
                     "-no-auth",
                     "-app-token", token,
                     "-instance-id", instance,
@@ -102,6 +109,7 @@ object Engine {
                 ),
                 File(dir, "gateway.log"), dir, env,
             )
+            savePids(ctx)
             // 只检查端口不够：19841 可能被同机其他应用占用，web 页会连到别人的服务。
             // 用本次启动的随机 instance-id 确认应答的是自己的网关。
             if (!waitGateway(instance, 15000)) {
@@ -145,6 +153,28 @@ object Engine {
         }
     }
 
+    /**
+     * 拉一次 go2rtc 并等它监听；失败返回 -1。调用方负责重试/报错。
+     */
+    private fun launch(
+        ctx: Context,
+        bin: File,
+        cfg: File,
+        dir: File,
+        env: Map<String, String>,
+        timeoutMs: Long,
+    ): Int {
+        val port = readApiPort(cfg)
+        if (port <= 0) return -1
+        engine = spawn(bin, listOf("-config", cfg.absolutePath), File(dir, "engine.log"), dir, env)
+        savePids(ctx)
+        if (waitPort(port, timeoutMs) && engine?.isAlive == true) return port
+        engine?.let { kill(it) }
+        engine = null
+        savePids(ctx)
+        return -1
+    }
+
     private fun spawn(
         bin: File,
         args: List<String>,
@@ -158,6 +188,47 @@ object Engine {
         pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log))
         pb.environment().putAll(env)
         return pb.start()
+    }
+
+    /**
+     * App 进程被系统回收时子进程会变成孤儿继续占着端口，导致下次启动永久失败。
+     * 启动前按上次记录的 PID 回收（校验 cmdline，避免误杀被复用的 PID）。
+     */
+    private fun killOrphans(ctx: Context) {
+        val self = android.os.Process.myPid()
+        val candidates = LinkedHashSet<Int>()
+        val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        prefs.getString("pids", null)?.split(',')?.forEach { part ->
+            part.trim().toIntOrNull()?.let { candidates.add(it) }
+        }
+        // 旧版本没有记录 PID：扫一遍 /proc 找残留的 libgo2rtc.so / libimi-gateway.so。
+        // Android 的 hidepid 只限制看别的 uid，自己拉起的子进程可见。
+        File("/proc").list()?.forEach { name ->
+            name.toIntOrNull()?.let { candidates.add(it) }
+        }
+        for (pid in candidates) {
+            if (pid <= 0 || pid == self || !isEngineProc(pid)) continue
+            try {
+                android.os.Process.killProcess(pid)
+                Log.i(TAG, "killed orphan $pid")
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    private fun isEngineProc(pid: Int): Boolean {
+        return try {
+            val cmd = File("/proc/$pid/cmdline").readText().trimEnd('\u0000')
+            cmd.contains("libgo2rtc.so") || cmd.contains("libimi-gateway.so")
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun savePids(ctx: Context) {
+        val pids = listOfNotNull(engine?.pid(), gateway?.pid())
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putString("pids", pids.joinToString(",")).apply()
     }
 
     private fun buildEnv(ctx: Context, dir: File): Map<String, String> {
@@ -333,6 +404,104 @@ object Engine {
         val value = bytes.joinToString("") { "%02x".format(it) }
         prefs.edit().putString("token", value).apply()
         return value
+    }
+
+    /** go2rtc API 对回环地址也要求 Basic Auth，密码与会话令牌一样随机生成并持久化。 */
+    private fun ensureApiPass(ctx: Context): String {
+        val prefs: SharedPreferences = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val existing = prefs.getString("apiPass", null)
+        if (!existing.isNullOrEmpty()) return existing
+        val value = randomHex(12)
+        prefs.edit().putString("apiPass", value).apply()
+        return value
+    }
+
+    /**
+     * 把 api 段的 local_auth / username / password 落进配置：
+     * 回环端口是所有应用共享的，没有认证时任意 App 都能读走 xiaomi-credentials。
+     */
+    private fun ensureApiAuth(cfg: File, pass: String) {
+        try {
+            val text = cfg.readText()
+            val eol = if (text.contains("\r\n")) "\r\n" else "\n"
+            val lines = text.split("\n").map { it.removeSuffix("\r") }.toMutableList()
+            val start = lines.indexOfFirst { Regex("^api:\\s*$").matches(it) }
+            if (start < 0) return
+            var end = lines.size
+            for (i in start + 1 until lines.size) {
+                val line = lines[i]
+                if (line.isNotEmpty() && !line[0].isWhitespace()) {
+                    end = i
+                    break
+                }
+            }
+
+            fun put(key: String, value: String) {
+                val re = Regex("^(\\s+)$key\\s*:.*$")
+                for (i in start + 1 until end) {
+                    val m = re.find(lines[i]) ?: continue
+                    lines[i] = "${m.groupValues[1]}$key: $value"
+                    return
+                }
+                lines.add(end, "  $key: $value")
+                end++
+            }
+            put("local_auth", "true")
+            put("username", "\"$API_USER\"")
+            put("password", "\"$pass\"")
+
+            val out = lines.joinToString(eol)
+            if (out != text) writeConfigAtomic(cfg, out)
+        } catch (t: Throwable) {
+            Log.w(TAG, "ensureApiAuth failed", t)
+        }
+    }
+
+    /** 配置决定下次能否启动：先写临时文件再改名，避免写一半被系统杀掉。 */
+    private fun writeConfigAtomic(cfg: File, text: String) {
+        val tmp = File(cfg.parentFile, "${cfg.name}.${android.os.Process.myPid()}.tmp")
+        tmp.writeText(text)
+        tmp.setReadable(true, true)
+        tmp.setWritable(true, true)
+        if (tmp.renameTo(cfg)) return
+        cfg.writeText(text)
+        tmp.delete()
+        cfg.setReadable(true, true)
+        cfg.setWritable(true, true)
+    }
+
+    /** 端口被占用时换一组回环端口；只改监听地址，其他配置不动。 */
+    private fun rewritePorts(cfg: File) {
+        try {
+            val text = cfg.readText()
+            var out = text
+            val ports = randomPorts(3).iterator()
+            for (section in listOf("api", "rtsp", "webrtc")) {
+                val old = readListenPort(text, section) ?: continue
+                if (!ports.hasNext()) break
+                out = out.replace("127.0.0.1:$old", "127.0.0.1:${ports.next()}")
+            }
+            if (out != text) writeConfigAtomic(cfg, out)
+        } catch (t: Throwable) {
+            Log.w(TAG, "rewritePorts failed", t)
+        }
+    }
+
+    private fun readListenPort(text: String, section: String): Int? {
+        var inSection = false
+        for (line in text.lineSequence()) {
+            if (Regex("^${Regex.escape(section)}:\\s*$").matches(line)) {
+                inSection = true
+                continue
+            }
+            if (inSection && line.isNotEmpty() && !line[0].isWhitespace()) return null
+            if (inSection) {
+                Regex("^\\s+listen:\\s*\"[^\"]*:(\\d+)\"").find(line)?.let {
+                    return it.groupValues[1].toIntOrNull()
+                }
+            }
+        }
+        return null
     }
 
     private fun readApiPort(cfg: File): Int {

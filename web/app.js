@@ -2329,7 +2329,7 @@ async function applyQuality(name, q, silent = false) {
   }
 
   // 不同型号的「高清/流畅」对应不同的 subtype 编号，写死接口值会拿到错误分辨率。
-  const map = QUALITY_BY_MODEL[meta.model || info.model] || QUALITY_BY_MODEL._default;
+  const map = qualityMap(meta.model || info.model);
   const subtype = map[q] ?? map.hd;
 
   try {
@@ -2364,7 +2364,7 @@ async function applyQuality(name, q, silent = false) {
 
 // 把流地址里的 subtype 换成指定画质对应的编号（各型号映射不同）
 function withSubtype(src, q, model) {
-  const map = QUALITY_BY_MODEL[model] || QUALITY_BY_MODEL._default;
+  const map = qualityMap(model);
   const subtype = map[q] ?? map.hd;
   try {
     const u = new URL(src);
@@ -2393,6 +2393,20 @@ const QUALITY_BY_MODEL = {
   'chuangmi.camera.061a01': { hd: 3, sd: 1 },
   _default: { hd: 2, sd: 1 },
 };
+
+// 型号来自云端 URL 参数，直接下标会命中原型链（constructor/__proto__）
+function qualityMap(model) {
+  return Object.prototype.hasOwnProperty.call(QUALITY_BY_MODEL, model)
+    ? QUALITY_BY_MODEL[model]
+    : QUALITY_BY_MODEL._default;
+}
+
+// 安卓首次运行（含从桌面版拷来的旧配置）：把没记录画质的摄像头切到子码流
+async function ensureSdDefault() {
+  for (const name of Array.from(state.cards.keys())) {
+    if (!state.meta[name]?.quality) await applyQuality(name, 'sd', true);
+  }
+}
 
 /* ------------------------------------------------------------------ */
 /* settings                                                            */
@@ -2852,7 +2866,7 @@ async function init() {
 
   // 安卓首次运行（含从桌面版拷来的旧配置）：把没记录画质的摄像头切到子码流
   if (PREFER_SD && localStorage.getItem('imi.sdDefault') !== '1') {
-    await ensureSdDefault();
+    try { await ensureSdDefault(); } catch (e) { console.warn('sd default failed', e); }
     localStorage.setItem('imi.sdDefault', '1');
   }
 

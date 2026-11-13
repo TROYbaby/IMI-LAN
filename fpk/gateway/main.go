@@ -126,13 +126,29 @@ func tokenAuth(token string, next http.Handler) http.Handler {
 	})
 }
 
-func newProxy(raw string) *httputil.ReverseProxy {
+// basicAuthTransport 给发往 go2rtc 的请求补上 Basic Auth。
+// go2rtc 在 local_auth: true 时连回环地址也要认证（Android 回环端口是所有应用共享的）。
+type basicAuthTransport struct {
+	user, pass string
+	base       http.RoundTripper
+}
+
+func (t basicAuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r := req.Clone(req.Context())
+	r.SetBasicAuth(t.user, t.pass)
+	return t.base.RoundTrip(r)
+}
+
+func newProxy(raw, user, pass string) *httputil.ReverseProxy {
 	target, err := url.Parse(raw)
 	if err != nil {
 		log.Fatalf("bad upstream %q: %v", raw, err)
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.FlushInterval = -1
+	if user != "" {
+		proxy.Transport = basicAuthTransport{user: user, pass: pass, base: http.DefaultTransport}
+	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		log.Printf("upstream %s %s: %v", r.Method, r.URL.Path, err)
 		http.Error(w, "服务未启动或暂时不可用", http.StatusBadGateway)
@@ -145,6 +161,8 @@ func main() {
 		listen     = flag.String("listen", "0.0.0.0:1984", "listen address")
 		staticDir  = flag.String("static", "", "web root directory")
 		go2rtcAddr = flag.String("go2rtc", "http://127.0.0.1:1986", "go2rtc upstream")
+		go2rtcUser = flag.String("go2rtc-user", "", "basic auth user for the go2rtc API (when local_auth is on)")
+		go2rtcPass = flag.String("go2rtc-pass", "", "basic auth password for the go2rtc API")
 		helperAddr = flag.String("helper", "http://127.0.0.1:1985", "qr-login helper upstream")
 		user       = flag.String("user", "imi", "basic auth user")
 		passFile   = flag.String("pass-file", "", "file containing the access password")
@@ -184,8 +202,8 @@ func main() {
 		cookieValue = cookieFor(username, password, secret)
 	}
 
-	go2rtcProxy := newProxy(*go2rtcAddr)
-	helperProxy := newProxy(*helperAddr)
+	go2rtcProxy := newProxy(*go2rtcAddr, *go2rtcUser, *go2rtcPass)
+	helperProxy := newProxy(*helperAddr, "", "")
 
 	static := http.FileServer(http.Dir(*staticDir))
 	staticHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -220,7 +238,7 @@ func main() {
 		if qrLog == "" {
 			qrLog = filepath.Dir(*configPath)
 		}
-		qr := newQRService(*configPath, *go2rtcAddr, filepath.Join(qrLog, "qr-login.log"))
+		qr := newQRService(*configPath, *go2rtcAddr, *go2rtcUser, *go2rtcPass, filepath.Join(qrLog, "qr-login.log"))
 		qr.register(mux)
 	} else {
 		mux.Handle("/qr", helperProxy)

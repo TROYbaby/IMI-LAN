@@ -24,7 +24,7 @@ func newTestService(t *testing.T) (*qrService, string) {
 	if err := os.WriteFile(path, []byte(sampleConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return newQRService(path, "http://127.0.0.1:19840", ""), path
+	return newQRService(path, "http://127.0.0.1:19840", "", "", ""), path
 }
 
 func TestSaveTokenWritesCredentials(t *testing.T) {
@@ -136,7 +136,7 @@ func TestCRLFCrlfPreserved(t *testing.T) {
 	if err := os.WriteFile(path, []byte(strings.ReplaceAll(sampleConfig, "\n", "\r\n")), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s := newQRService(path, "http://127.0.0.1:19840", "")
+	s := newQRService(path, "http://127.0.0.1:19840", "", "", "")
 	if err := s.saveToken("111", credential{PassToken: "a"}); err != nil {
 		t.Fatal(err)
 	}

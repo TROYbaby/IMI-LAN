@@ -3,6 +3,8 @@ go2rtc.yaml
 go2rtc.yaml.bak
 go2rtc.yaml.*
 !go2rtc.yaml.example
+# 安卓模板只有占位符，没有真实凭据；上面的规则会误伤，必须入库
+!android/app/src/main/assets/go2rtc.yaml
 
 # 运行日志：含配置文件绝对路径（本机用户名）、设备 DID 和 IP
 *.log
