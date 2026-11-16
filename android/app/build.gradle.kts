@@ -1,4 +1,5 @@
 import java.util.Properties
+import org.gradle.api.tasks.Sync
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -91,4 +92,16 @@ kotlin {
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_17)
     }
+}
+
+// assets/web 是构建产物：唯一来源是仓库根目录的 web/（android/build.py 也会同步一次）。
+// 这里再挂到 preBuild 上，直接跑 gradle（不走 build.py）也不会打进缺失或过期的网页。
+// 该目录已在 .gitignore 里，不入库。
+tasks.register<Sync>("syncWebAssets") {
+    from(rootProject.file("../web"))
+    into(layout.projectDirectory.dir("src/main/assets/web"))
+}
+
+tasks.named("preBuild") {
+    dependsOn("syncWebAssets")
 }

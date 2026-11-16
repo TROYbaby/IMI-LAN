@@ -17,6 +17,7 @@ import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -41,6 +42,7 @@ class MainActivity : Activity() {
     private var loaded = false
     private var customView: View? = null
     private var customCallback: WebChromeClient.CustomViewCallback? = null
+    private var immersive = false
 
     private val pollState = object : Runnable {
         override fun run() {
@@ -65,6 +67,7 @@ class MainActivity : Activity() {
         retry = findViewById(R.id.retry)
 
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        setupEdgeToEdge()
         applySystemBarInsets()
         askNotificationPermission()
 
@@ -84,14 +87,30 @@ class MainActivity : Activity() {
 
     /**
      * targetSdk 35 默认强制 edge-to-edge，网页会画到状态栏/导航栏下面。
-     * 给根布局补上系统栏高度的内边距；进入全屏时 inset 变 0，自动还原。
+     * 统一按 edge-to-edge 布局，由下面的 insets 监听补内边距；进入全屏时 inset 变 0，自动还原。
      */
+    private fun setupEdgeToEdge() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.setDecorFitsSystemWindows(false)
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                )
+        }
+    }
+
+    /** 给根布局补系统栏与输入法内边距；全屏隐藏系统栏时 inset 为 0，网页自然铺满。 */
     private fun applySystemBarInsets() {
         val view = findViewById<View>(R.id.root)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             view.setOnApplyWindowInsetsListener { v, insets ->
                 val bars = insets.getInsets(
-                    WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
+                    WindowInsets.Type.systemBars()
+                        or WindowInsets.Type.displayCutout()
+                        or WindowInsets.Type.ime()
                 )
                 v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
                 insets
@@ -110,7 +129,8 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun setupWebView() {        WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
+    private fun setupWebView() {
+        WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
         web.setBackgroundColor(Color.parseColor("#0E1726"))
         web.settings.apply {
             javaScriptEnabled = true
@@ -121,6 +141,7 @@ class MainActivity : Activity() {
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             allowFileAccess = false
             allowContentAccess = false
+            // 禁止 WebView 页面级缩放；视频画面的捏合缩放由网页在「放大镜」开启时自行处理
             setSupportZoom(false)
             builtInZoomControls = false
             displayZoomControls = false
@@ -130,6 +151,7 @@ class MainActivity : Activity() {
         }
 
         web.addJavascriptInterface(DownloadBridge(this), "IMIAndroid")
+        web.addJavascriptInterface(ShellBridge(), "IMIShell")
 
         web.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -211,25 +233,32 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
+    @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         if (customView != null) {
             web.evaluateJavascript("document.fullscreenElement && document.exitFullscreen()", null)
             chrome.onHideCustomView()
             return
         }
-        if (web.canGoBack()) {
-            web.goBack()
-            return
+        // 先让网页处理：退出全屏 / 大屏 / 弹窗；没处理再走 WebView 返回或退到后台
+        web.evaluateJavascript("(window.__imiBack && window.__imiBack()) === true") { result ->
+            if (result == "true") return@evaluateJavascript
+            if (web.canGoBack()) web.goBack() else moveTaskToBack(true)
         }
-        moveTaskToBack(true)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // 从通知栏/多任务回来后系统栏会重新出现，全屏状态下再隐藏一次
+        if (hasFocus && immersive) hideSystemBars()
     }
 
     private fun hideSystemBars() {
+        immersive = true
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            window.setDecorFitsSystemWindows(false)
             window.insetsController?.let {
-                it.hide(WindowInsets.Type.systemBars())
                 it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                it.hide(WindowInsets.Type.systemBars())
             }
         } else {
             @Suppress("DEPRECATION")
@@ -245,12 +274,26 @@ class MainActivity : Activity() {
     }
 
     private fun showSystemBars() {
+        immersive = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            window.setDecorFitsSystemWindows(true)
             window.insetsController?.show(WindowInsets.Type.systemBars())
         } else {
             @Suppress("DEPRECATION")
-            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+            window.decorView.systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                )
+        }
+    }
+
+    /** 网页全屏（大屏墙 / 单路全屏）时同步隐藏安卓系统栏。 */
+    private inner class ShellBridge {
+        @JavascriptInterface
+        fun setFullscreen(on: Boolean) {
+            runOnUiThread {
+                if (on) hideSystemBars() else showSystemBars()
+            }
         }
     }
 
@@ -280,7 +323,12 @@ class MainActivity : Activity() {
             customCallback?.onCustomViewHidden()
             customCallback = null
             web.visibility = View.VISIBLE
-            showSystemBars()
+            // 大屏墙可能还开着，让网页决定是否继续隐藏系统栏
+            web.evaluateJavascript(
+                "(function(){var w=document.body.classList.contains('wall')||!!document.fullscreenElement;" +
+                    "window.IMIShell&&window.IMIShell.setFullscreen(w)})()",
+                null,
+            )
         }
     }
 }

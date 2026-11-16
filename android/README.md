@@ -37,7 +37,7 @@ python android/build.py --release
 
 1. 复用/生成 `fpk/.build` 里已打补丁的 go2rtc 源码（标记文件记录补丁 sha256，`fpk/patches/xiaomi-login.patch` 改动后会自动重新解包打补丁）；
 2. 交叉编译两个 ABI 的引擎与网关，做 ELF 架构校验；
-3. 把 `web/` 复制到 `app/src/main/assets/web`；
+3. 把 `web/` 复制到 `app/src/main/assets/web`（该目录是构建产物，已在 `.gitignore` 里；`app/build.gradle.kts` 的 `preBuild` 也会同步一次，直接跑 gradle 同样有效）；
 4. 写 `local.properties` 并调用 Gradle（默认先 `clean`，否则增量打包会在 APK 里留下旧填充，体积越滚越大）；
 5. 把产物复制到 `android/dist/`，命名 `imi-lan_<版本>_<abi>_<debug|release>.apk`，并检查 APK 里的 `lib/<abi>/*.so`、`assets/web/index.html`、`assets/go2rtc.yaml`、`assets/ca.pem`。
 
@@ -72,6 +72,16 @@ adb install -r android/dist/imi-lan_1.0.1_arm64_debug.apk
 4. 「添加摄像头」选设备，导入后即可观看。
 
 通知栏有「重启引擎」「停止」两个动作。停止后再次打开 App 会自动重新启动。
+
+## 触屏与全屏
+
+- **平板自动放大**：`index.html` 里的内联脚本按 `screen.width` 和 `pointer: coarse`（且没有 `pointer: fine`，触屏笔记本不放大）判断。平板横屏把布局视口压到 1024（WebView 放大 1.25 倍），竖屏压到约 `screen.width / 1.3`（约 1.3 倍），旋转后自动重算；手机保持 `device-width`，不会缩放。
+- **按钮加大**：`style.css` 的 `@media (pointer: coarse)` 把顶栏、卡片工具、弹窗、设置项的主要可点区域放到 38–44px。
+- **拼接全屏**：网页调 `IMIShell.setFullscreen(true)` 让壳隐藏状态栏/导航栏，同时隐藏网页顶栏和侧栏；退出用右上角的 ✕、安卓返回键或双击画面。壳内**不使用** DOM 全屏（`requestFullscreen` 会触发 WebView 的 `onShowCustomView`，另起一层视图，网页自己的控件会消失），桌面浏览器仍然走标准全屏。
+- **单画面查看**：双击卡片（或点 ⛶）打开单路画面时自动隐藏系统栏；单击画面隐藏/显示顶部和底部控件，双击退出（点开「放大镜」时双击只复位缩放），返回键或右上角的 ✕ 一步退出并恢复系统栏。
+- **画面缩放**：页面级捏合缩放已关闭（WebView `setSupportZoom(false)`，网页侧再用 `touch-action: manipulation` 禁掉双击缩放）；只有点开「放大镜」后，才能对当前视频画面双指捏合、单指拖动，双击复位。
+- **返回键**：先让网页处理（退出拼接全屏 → 关闭单画面查看 → 关闭登录/设置弹窗），网页没处理再 `goBack()`，最后退到后台。
+- 每次安装/更新（按 `PackageInfo.lastUpdateTime` 判断）都会把 `assets/web` 重新拷到 `files/engine/web`，debug 包版本号不变也不会继续用旧页面。
 
 ## 数据与端口
 

@@ -226,9 +226,26 @@ object Engine {
     }
 
     private fun savePids(ctx: Context) {
-        val pids = listOfNotNull(engine?.pid(), gateway?.pid())
+        val pids = listOfNotNull(pidOf(engine), pidOf(gateway))
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit().putString("pids", pids.joinToString(",")).apply()
+    }
+
+    /**
+     * Process.pid() 是 Java 9 / Android 8 (API 26) 的 API，
+     * 这里用反射取，避免不同编译工具链对 java.lang.Process 的解析差异。
+     */
+    private fun pidOf(p: Process?): Int? {
+        if (p == null) return null
+        return try {
+            when (val pid = Process::class.java.getMethod("pid").invoke(p)) {
+                is Long -> pid.toInt()
+                is Int -> pid
+                else -> null
+            }
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     private fun buildEnv(ctx: Context, dir: File): Map<String, String> {
@@ -319,7 +336,10 @@ object Engine {
 
         val webDir = File(dir, "web")
         val stamp = File(dir, ".web-version")
-        val want = BuildConfig.VERSION_CODE.toString()
+        // 每次安装/更新都重新拷一次网页资源（几 MB，很快），
+        // 否则 debug 包版本号不变时，平板会一直用旧的 index.html / app.js。
+        @Suppress("DEPRECATION")
+        val want = ctx.packageManager.getPackageInfo(ctx.packageName, 0).lastUpdateTime.toString()
         if (!webDir.isDirectory || !File(webDir, "index.html").isFile ||
             !stamp.isFile || stamp.readText().trim() != want
         ) {
