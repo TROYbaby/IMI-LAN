@@ -367,7 +367,9 @@ function selectRoom(name) {
   rememberLayout();
   state.settings.single = name;
   state.settings.scope = 'room';
-  state.settings.layout = savedLayoutFor(roomLabel(name));
+  // 手机上点房间 = 看这一路：保持单画面。原来会回落到 gridLayout（默认 2x2），
+  // 于是每点一次摄像机都被弹成 4 宫格。
+  state.settings.layout = narrowScreen() ? '1x1' : savedLayoutFor(roomLabel(name));
   saveSettings();
   closeLayoutMenu();
   updateLayoutUI();
@@ -473,12 +475,18 @@ function updateOnlineStatus() {
   }
 }
 
+// 房间条上一次渲染的签名：每 5 秒整体 innerHTML 重建会连带重排整个侧栏
+let roomsSig = '';
+
 function renderRooms() {
   const box = $('#roomList');
   if (!box) return;
   const names = cameraList();
   if (!names.length) {
-    box.innerHTML = '<div class="room-empty">还没有<br>摄像头</div>';
+    if (roomsSig !== '@empty') {
+      box.innerHTML = '<div class="room-empty">还没有摄像头</div>';
+      roomsSig = '@empty';
+    }
     updateOnlineStatus();
     return;
   }
@@ -493,6 +501,15 @@ function renderRooms() {
   const allLive = names.filter(cameraOnline).length;
   const scopeAll = state.settings.scope === 'all';
   const activeRoom = scopeAll ? '' : roomLabel(state.settings.single || '');
+
+  const sig = names.map(n => n + ':' + (cameraOnline(n) ? 1 : 0)).join('|')
+    + '#' + scopeAll + '#' + activeRoom;
+  if (sig === roomsSig) {
+    updateOnlineStatus();
+    return;
+  }
+  roomsSig = sig;
+
   let html = '';
   for (const [label, group] of groups) {
     const live = group.filter(cameraOnline).length;
@@ -511,6 +528,17 @@ function renderRooms() {
       <em>${allLive}/${names.length}</em>
     </button>`;
   box.innerHTML = html;
+
+  // 手机上是横向滚动条：把当前选中的摄像机滚到可视区中间。
+  // 不用 scrollIntoView —— 它会连带滚动所有可滚祖先，横向条里容易把页面一起带跑。
+  if (box.scrollWidth > box.clientWidth) {
+    const on = box.querySelector('.room.on');
+    if (on) {
+      const target = on.offsetLeft - (box.clientWidth - on.offsetWidth) / 2;
+      box.scrollLeft = Math.max(0, Math.min(target, box.scrollWidth - box.clientWidth));
+    }
+  }
+
   updateOnlineStatus();
 }
 
@@ -526,8 +554,13 @@ function levelForRate(mbps) {
   return 1;
 }
 
+// 手机上码率信息是隐藏的，没必要每 2 秒取一次数据再写 DOM
+let lastSignalAt = 0;
+
 async function pollSignals() {
   if (state.pageHidden || state.viewer || signalBusy || !state.cards.size) return;
+  if (narrowScreen() && Date.now() - lastSignalAt < 10000) return;
+  lastSignalAt = Date.now();
   signalBusy = true;
   try {
     const data = await api('/api/streams');
@@ -591,6 +624,24 @@ function updateSingleNav(names) {
   }
 }
 
+// 手机窄屏判定，与 CSS 的 600px 断点保持一致
+function narrowScreen() {
+  try { return matchMedia('(max-width: 600px)').matches; } catch (_) { return false; }
+}
+
+// 触屏判定：决定「单击卡片是否直接进单画面」
+function pointerCoarse() {
+  try { return matchMedia('(pointer: coarse)').matches; } catch (_) { return false; }
+}
+
+// 单画面刚打开的时刻：手指第二下落下时要忽略，否则会被当成「双击退出」
+let viewerOpenedAt = 0;
+
+// 轻触反馈：安卓 / 鸿蒙 有振动马达，iOS 浏览器忽略即可
+function haptic(ms) {
+  try { if (navigator.vibrate) navigator.vibrate(ms || 8); } catch (_) {}
+}
+
 function stepSingle(dir) {
   const names = cameraList();
   if (names.length < 2) return;
@@ -599,6 +650,39 @@ function stepSingle(dir) {
   state.settings.single = names[(i + dir + names.length) % names.length];
   saveSettings();
   refreshStreams();
+}
+
+// 单画面左右滑动切换摄像机：HIG 与鸿蒙都以此为主手势，
+// 比去够顶部的下拉框顺手得多。缩放手势开启或落在按钮上时不接管。
+let swipeX = 0, swipeY = 0, swipeAt = 0, swipeOn = false;
+
+function bindSwipeSwitch() {
+  const host = document.querySelector('.stage-body');
+  if (!host) return;
+
+  host.addEventListener('touchstart', ev => {
+    swipeOn = false;
+    if (state.viewer) return;
+    if (state.settings.layout !== '1x1') return;
+    if (ev.touches.length !== 1) return;
+    if (ev.target.closest('button, .card-tools, .card-menu-btn, .zoom-hud, .zoom-on')) return;
+    const t = ev.touches[0];
+    swipeX = t.clientX; swipeY = t.clientY; swipeAt = Date.now();
+    swipeOn = true;
+  }, { passive: true });
+
+  host.addEventListener('touchend', ev => {
+    if (!swipeOn) return;
+    swipeOn = false;
+    const t = ev.changedTouches && ev.changedTouches[0];
+    if (!t) return;
+    if (Date.now() - swipeAt > 700) return;
+    const dx = t.clientX - swipeX;
+    const dy = t.clientY - swipeY;
+    if (Math.abs(dx) < 56 || Math.abs(dx) < Math.abs(dy) * 1.6) return;
+    stepSingle(dx < 0 ? 1 : -1);
+    haptic();
+  }, { passive: true });
 }
 
 function isBatteryModel(model) {
@@ -688,6 +772,9 @@ async function checkEngine() {
   }
 }
 
+// 上一次渲染用的布局签名：可见集合与布局都没变时，不再写 DOM
+let lastGridSig = '';
+
 async function refreshStreams() {
   if (state.pageHidden) return;
   let data;
@@ -726,6 +813,29 @@ async function refreshStreams() {
   }
   updateSingleNav(candidates);
 
+  const single = state.settings.layout === '1x1';
+  const cols = single ? 1 : spec.cols;
+  const rows = single ? 1 : (spec.limit ? Math.ceil(spec.limit / spec.cols) : Math.max(1, Math.ceil(visible.length / spec.cols)));
+
+  // 原来这里每 5 秒无条件重设 grid 变量、重建空窗口、重算 fitGrid，
+  // 会强制整页重排一次；视频正在解码时就是肉眼可见的周期性卡顿。
+  // 布局与可见集合都没变化时直接跳过，只做不产生重排的轻量更新。
+  const gridSig = [
+    state.settings.layout, state.settings.display, cols, rows,
+    visible.join('|'), allNames.length, spec.limit || 0,
+    // 卡片数量也要进签名：清空 / 删除一路会先销毁卡片再回来重建，
+    // 只比对 names 与布局的话会漏掉这一种，导致画面空白。
+    state.cards.size,
+  ].join('#');
+  if (gridSig === lastGridSig) {
+    updateLayoutUI();
+    updateSettings();
+    renderRooms();
+    updateOnlineStatus();
+    return;
+  }
+  lastGridSig = gridSig;
+
   $('#grid').querySelectorAll('.grid-slot').forEach(el => el.remove());
 
   visible.forEach((name, i) => {
@@ -740,9 +850,6 @@ async function refreshStreams() {
   }
 
   const grid = $('#grid');
-  const single = state.settings.layout === '1x1';
-  const cols = single ? 1 : spec.cols;
-  const rows = single ? 1 : (spec.limit ? Math.ceil(spec.limit / spec.cols) : Math.max(1, Math.ceil(visible.length / spec.cols)));
   grid.style.setProperty('--grid-cols', String(cols));
   grid.style.setProperty('--grid-rows', String(rows));
   grid.dataset.layout = state.settings.layout;
@@ -1463,6 +1570,16 @@ function createCard(name, delay = 0) {
   card.addEventListener('dblclick', ev => {
     if (document.body.classList.contains('wall')) return;
     if (ev.target.closest('[data-act]') || ev.target.closest('.card-mask')) return;
+    openViewer(name);
+  });
+
+  // 触屏上双击既难触发、又和缩放手势打架，回到单击进单画面；
+  // 桌面端维持原样（单击容易误开全屏）。
+  card.addEventListener('click', ev => {
+    if (!pointerCoarse()) return;
+    if (document.body.classList.contains('wall')) return;
+    if (ev.target.closest('[data-act], .card-tools, .card-menu-btn, .zoom-hud, .card-mask')) return;
+    viewerOpenedAt = performance.now();
     openViewer(name);
   });
 
@@ -2803,6 +2920,7 @@ function bindEvents() {
   });
   $('#btnSinglePrev').addEventListener('click', () => stepSingle(-1));
   $('#btnSingleNext').addEventListener('click', () => stepSingle(1));
+  bindSwipeSwitch();
   $('#singleSelect').addEventListener('change', () => {
     state.settings.single = $('#singleSelect').value;
     saveSettings();
@@ -2902,6 +3020,8 @@ function bindEvents() {
     if (isViewerControl(ev.target)) return;
 
     const now = performance.now();
+    // 刚用单击打开时，手指第二下会落在这里；不忽略的话画面刚进来就收起工具栏
+    if (now - viewerOpenedAt < 400) return;
     const isDouble = now - lastTapAt < 300
       && Math.hypot(ev.clientX - lastTapX, ev.clientY - lastTapY) < 44;
     if (isDouble) {
