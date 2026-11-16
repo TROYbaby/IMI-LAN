@@ -19,6 +19,9 @@ class VideoStream extends VideoRTC {
     set divError(value) {
         // 已经出画时忽略次要模式的报错，避免把正常画面标成错误
         if (this.video && this.video.readyState >= 2 && this.video.videoWidth > 0) return;
+        // 安卓上 go2rtc 枚举网卡会被系统拒绝（netlinkrib），但本机回环 WebRTC 照常出画，
+        // 这条提示对用户没有意义，不要盖在画面上。
+        if (/netlinkrib: permission denied/i.test(String(value))) return;
         this.querySelector('.mode').innerText = 'error';
         this.querySelector('.status').innerText = value;
         this.dispatchEvent(new CustomEvent('playstatus', {detail: value}));

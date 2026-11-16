@@ -34,6 +34,21 @@ const IS_APP = new URLSearchParams(location.search).has('app');
 // 只有安卓壳会注入 IMIAndroid 桥；桌面版和浏览器里这个值为 false。
 const PREFER_SD = !!(window.IMIAndroid && window.IMIAndroid.preferSD && window.IMIAndroid.preferSD());
 
+// 安卓壳通过 IMIShell 桥同步系统栏：网页全屏时隐藏状态栏/导航栏。
+// 壳内不再走元素全屏（WebView 的 onShowCustomView 会另起一层视图，
+// 只渲染全屏元素，右上角的退出按钮会跟着消失）；桌面浏览器仍用标准全屏。
+const HAS_SHELL = !!(window.IMIShell && window.IMIShell.setFullscreen);
+function setNativeFullscreen(on) {
+  try { window.IMIShell?.setFullscreen?.(!!on); } catch {}
+}
+function requestWebFullscreen(el) {
+  if (HAS_SHELL) return;
+  el?.requestFullscreen?.().catch(() => {});
+}
+function exitWebFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+}
+
 // 后台保持连接最多维持 2 分钟，之后释放视频解码与引擎缓冲，回到前台自动重连
 const BACKGROUND_IDLE_MS = 2 * 60 * 1000;
 const HIDDEN_GRACE_MS = 4 * 1000;
@@ -43,6 +58,8 @@ let resumeToken = 0;
 let pollTimers = [];
 let authToastAt = 0;
 let roomSyncFailed = false;
+// 双击退出单画面后，浏览器还会补发一次 dblclick；短暂吞掉它，避免又触发卡片的双击打开
+let viewerDblUntil = 0;
 
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */
@@ -794,11 +811,13 @@ function regionName(region) {
 const ZOOM_MIN = 1;
 const ZOOM_MAX = 4;
 
-// 画面缩放/平移：滚轮或 HUD 缩放，拖动平移，双击复位
+// 画面缩放/平移：滚轮、双指捏合或 HUD 缩放，拖动平移，双击复位
 function createZoom(surface, { onChange } = {}) {
   if (surface._zoom) return surface._zoom;
 
   const st = { enabled: false, scale: 1, tx: 0, ty: 0, dragging: false, pointerId: null, sx: 0, sy: 0, stx: 0, sty: 0 };
+  const pointers = new Map();
+  let pinch = null;
   const hud = document.createElement('div');
   hud.className = 'zoom-hud';
   hud.innerHTML = '<button type="button" data-zoom="-" aria-label="缩小">−</button>'
@@ -850,13 +869,73 @@ function createZoom(surface, { onChange } = {}) {
     apply();
   }
 
+  function startDrag(pointerId, x, y) {
+    st.dragging = true;
+    st.pointerId = pointerId;
+    st.sx = x;
+    st.sy = y;
+    st.stx = st.tx;
+    st.sty = st.ty;
+    surface.classList.add('zoom-drag');
+  }
+
+  function stopDrag() {
+    st.dragging = false;
+    st.pointerId = null;
+    surface.classList.remove('zoom-drag');
+  }
+
+  function startPinch() {
+    if (pointers.size < 2) return;
+    const [a, b] = pointers.values();
+    pinch = {
+      dist: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
+      mx: (a.x + b.x) / 2,
+      my: (a.y + b.y) / 2,
+      scale: st.scale,
+      tx: st.tx,
+      ty: st.ty,
+    };
+  }
+
+  // 双指捏合：围绕两指中点缩放，并跟随中点移动
+  function movePinch() {
+    if (!pinch || pointers.size < 2) return;
+    const [a, b] = pointers.values();
+    const dist = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
+    const mx = (a.x + b.x) / 2;
+    const my = (a.y + b.y) / 2;
+    const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, pinch.scale * dist / pinch.dist));
+    const r = surface.getBoundingClientRect();
+    const dx0 = pinch.mx - r.left - r.width / 2;
+    const dy0 = pinch.my - r.top - r.height / 2;
+    const dx1 = mx - r.left - r.width / 2;
+    const dy1 = my - r.top - r.height / 2;
+    const k = next / pinch.scale;
+    st.scale = next;
+    st.tx = dx1 - (dx0 - pinch.tx) * k;
+    st.ty = dy1 - (dy0 - pinch.ty) * k;
+    clamp();
+    apply();
+    // 以当前实际状态为新起点，避免缩到 1 倍时平移被清零后再次放大产生跳变
+    pinch = { dist, mx, my, scale: st.scale, tx: st.tx, ty: st.ty };
+  }
+
   function setEnabled(on) {
     on = !!on;
     if (st.enabled === on) {
-      if (!on) reset();
+      if (!on) {
+        reset();
+        pointers.clear();
+        pinch = null;
+        stopDrag();
+      }
       return;
     }
     st.enabled = on;
+    pointers.clear();
+    pinch = null;
+    stopDrag();
     surface.classList.toggle('zoom-on', on);
     hud.classList.toggle('on', on);
     reset();
@@ -869,19 +948,30 @@ function createZoom(surface, { onChange } = {}) {
     zoomAt(ev.deltaY < 0 ? 1.18 : 1 / 1.18, ev.clientX, ev.clientY);
   };
   const onDown = ev => {
-    if (!st.enabled || ev.button !== 0) return;
+    if (!st.enabled) return;
+    if (ev.pointerType === 'mouse' && ev.button !== 0) return;
     if (ev.target.closest('button, .zoom-hud, .card-tools, .card-menu-btn, [data-act], .mask-btn')) return;
-    st.dragging = true;
-    st.pointerId = ev.pointerId;
-    st.sx = ev.clientX;
-    st.sy = ev.clientY;
-    st.stx = st.tx;
-    st.sty = st.ty;
-    surface.classList.add('zoom-drag');
+    pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
     try { surface.setPointerCapture(ev.pointerId); } catch {}
+    if (pointers.size === 1) {
+      startDrag(ev.pointerId, ev.clientX, ev.clientY);
+    } else if (pointers.size === 2) {
+      stopDrag();
+      startPinch();
+    }
     ev.preventDefault();
   };
   const onMove = ev => {
+    if (!st.enabled) return;
+    if (pointers.has(ev.pointerId)) {
+      pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+    }
+    if (pointers.size >= 2) {
+      if (!pinch) startPinch();
+      movePinch();
+      ev.preventDefault();
+      return;
+    }
     if (!st.dragging || ev.pointerId !== st.pointerId) return;
     st.tx = st.stx + ev.clientX - st.sx;
     st.ty = st.sty + ev.clientY - st.sy;
@@ -889,10 +979,23 @@ function createZoom(surface, { onChange } = {}) {
     apply();
   };
   const onUp = ev => {
-    if (!st.dragging || ev.pointerId !== st.pointerId) return;
-    st.dragging = false;
-    surface.classList.remove('zoom-drag');
+    pointers.delete(ev.pointerId);
     try { surface.releasePointerCapture(ev.pointerId); } catch {}
+    if (pinch) {
+      if (pointers.size >= 2) {
+        startPinch();
+      } else {
+        pinch = null;
+        stopDrag();
+        if (pointers.size === 1) {
+          const [id, p] = pointers.entries().next().value;
+          startDrag(id, p.x, p.y);
+        }
+      }
+      return;
+    }
+    if (!st.dragging || ev.pointerId !== st.pointerId) return;
+    stopDrag();
   };
   const onDbl = ev => {
     if (!st.enabled || ev.target.closest('button, .card-tools, .zoom-hud')) return;
@@ -1594,16 +1697,28 @@ function openViewer(name) {
   renderViewerChips();
   tickClock();
 
+  $('#modalViewer').classList.remove('chrome-off');
   $('#modalViewer').classList.add('open');
   $('#modalViewer').setAttribute('aria-hidden', 'false');
   document.body.style.overflow = 'hidden';
+
+  // 单画面查看本身就是全屏：进来就隐藏安卓系统栏，
+  // 否则状态栏会一直压在画面上方（桌面浏览器保持原样，按 F 才进入元素全屏）。
+  if (HAS_SHELL) {
+    viewer.nativeFull = true;
+    setNativeFullscreen(true);
+  }
 }
 
 function closeViewer() {
   const viewer = state.viewer;
   if (!viewer) return;
 
-  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  if (document.fullscreenElement) exitWebFullscreen();
+  if (viewer.nativeFull) {
+    viewer.nativeFull = false;
+    setNativeFullscreen(false);
+  }
 
   if (viewer.recorder && viewer.recorder.state !== 'inactive') {
     try { viewer.recorder.stop(); } catch {}
@@ -1619,11 +1734,21 @@ function closeViewer() {
   if (chips) chips.innerHTML = '';
   $('#qualityMenu').classList.remove('open');
   $('#modalViewer').classList.remove('open');
+  $('#modalViewer').classList.remove('chrome-off');
   $('#modalViewer').setAttribute('aria-hidden', 'true');
   document.body.style.overflow = '';
 
   releaseCardsForViewer();
   setRecUI(false);
+}
+
+// 单画面里单击画面：隐藏/显示顶部和底部控件（右上角菜单一起收起）
+function toggleViewerChrome(show) {
+  const modal = $('#modalViewer');
+  if (!modal.classList.contains('open')) return;
+  const off = typeof show === 'boolean' ? !show : !modal.classList.contains('chrome-off');
+  modal.classList.toggle('chrome-off', off);
+  if (off) $('#qualityMenu').classList.remove('open');
 }
 
 function recreateViewerPlayer({ microphone } = {}) {
@@ -1699,13 +1824,15 @@ function enterWall() {
   if ($('#modalLogin').classList.contains('open')) closeAdd();
   $('#qualityMenu').classList.remove('open');
   document.body.classList.add('wall');
-  document.documentElement.requestFullscreen?.().catch(() => {});
+  setNativeFullscreen(true);
+  requestWebFullscreen(document.documentElement);
 }
 
 function exitWall() {
   if (!document.body.classList.contains('wall')) return;
   document.body.classList.remove('wall');
-  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  setNativeFullscreen(false);
+  exitWebFullscreen();
   refreshStreams();
 }
 
@@ -1751,10 +1878,15 @@ function toggleViewerMute() {
 }
 
 function toggleViewerFullscreen() {
-  if (document.fullscreenElement) {
-    document.exitFullscreen().catch(() => {});
+  const viewer = state.viewer;
+  const on = !(document.fullscreenElement || viewer?.nativeFull);
+  if (viewer) viewer.nativeFull = on;
+  setNativeFullscreen(on);
+  if (on) {
+    // 壳内只隐藏系统栏；浏览器里再叠一层标准全屏
+    requestWebFullscreen($('#modalViewer'));
   } else {
-    $('#modalViewer').requestFullscreen?.().catch(() => {});
+    exitWebFullscreen();
   }
 }
 
@@ -2461,6 +2593,7 @@ function bindEvents() {
   $('#btnAdd').addEventListener('click', openAdd);
   $('#btnAddEmpty').addEventListener('click', openAdd);
   $('#btnWall').addEventListener('click', enterWall);
+  $('#btnWallExit').addEventListener('click', exitWall);
   $('#btnRefresh').addEventListener('click', async () => {
     await checkEngine();
     await refreshStreams();
@@ -2676,6 +2809,80 @@ function bindEvents() {
     }
   });
 
+  // 单画面：单击画面切换控件显示，双击退出（打开放大镜时双击只复位画面）
+  const viewerStage = $('#viewerStage');
+  const stagePointers = new Map();
+  let stageTap = null;
+  let stageTapTimer = 0;
+  let lastTapAt = 0;
+  let lastTapX = 0;
+  let lastTapY = 0;
+  const isViewerControl = target => !!target?.closest?.(
+    'button, .zoom-hud, [data-act], .viewer-top, .viewer-bottom, .quality-menu'
+  );
+
+  viewerStage.addEventListener('pointerdown', ev => {
+    if (stageTapTimer) {
+      clearTimeout(stageTapTimer);
+      stageTapTimer = 0;
+    }
+    stagePointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+    if (stagePointers.size !== 1 || isViewerControl(ev.target)) {
+      stageTap = null;
+      return;
+    }
+    stageTap = { x: ev.clientX, y: ev.clientY, at: performance.now() };
+  });
+
+  viewerStage.addEventListener('pointermove', ev => {
+    if (!stageTap || !stagePointers.has(ev.pointerId)) return;
+    if (Math.hypot(ev.clientX - stageTap.x, ev.clientY - stageTap.y) > 10) stageTap = null;
+  });
+
+  viewerStage.addEventListener('pointercancel', ev => {
+    stagePointers.delete(ev.pointerId);
+    stageTap = null;
+  });
+
+  viewerStage.addEventListener('pointerup', ev => {
+    stagePointers.delete(ev.pointerId);
+    if (!stageTap || stagePointers.size) return;
+    if (performance.now() - stageTap.at > 700) {
+      stageTap = null;
+      return;
+    }
+    stageTap = null;
+    if (isViewerControl(ev.target)) return;
+
+    const now = performance.now();
+    const isDouble = now - lastTapAt < 300
+      && Math.hypot(ev.clientX - lastTapX, ev.clientY - lastTapY) < 44;
+    if (isDouble) {
+      lastTapAt = 0;
+      clearTimeout(stageTapTimer);
+      stageTapTimer = 0;
+      const viewer = state.viewer;
+      if (!viewer) return;
+      if (viewer.zoom?.enabled) {
+        viewer.zoom.reset();
+      } else {
+        viewerDblUntil = performance.now() + 400;
+        closeViewer();
+      }
+      return;
+    }
+
+    lastTapAt = now;
+    lastTapX = ev.clientX;
+    lastTapY = ev.clientY;
+    clearTimeout(stageTapTimer);
+    // 与双击判定窗口（300ms）保持一致，避免第二下刚好落在 250~300ms 时先收起再退出
+    stageTapTimer = setTimeout(() => {
+      stageTapTimer = 0;
+      toggleViewerChrome();
+    }, 300);
+  });
+
   $('#btnViewerQuality').addEventListener('click', ev => {
     ev.stopPropagation();
     $('#qualityMenu').classList.toggle('open');
@@ -2692,6 +2899,14 @@ function bindEvents() {
       $('#qualityMenu').classList.remove('open');
     }
   });
+
+  // 双击退出单画面时，随后补发的 dblclick 会落到手指下方的卡片上；这里一次性拦掉
+  document.addEventListener('dblclick', ev => {
+    if (!viewerDblUntil || performance.now() >= viewerDblUntil) return;
+    viewerDblUntil = 0;
+    ev.preventDefault();
+    ev.stopPropagation();
+  }, true);
 
   document.addEventListener('keydown', ev => {
     if (document.body.classList.contains('wall')) {
@@ -2790,7 +3005,13 @@ function bindEvents() {
   });
 
   document.addEventListener('fullscreenchange', () => {
-    if (!document.fullscreenElement) exitWall();
+    if (state.viewer) state.viewer.nativeFull = !!document.fullscreenElement;
+    if (document.fullscreenElement) {
+      setNativeFullscreen(true);
+      return;
+    }
+    if (document.body.classList.contains('wall')) exitWall();
+    else setNativeFullscreen(false);
   });
 
   window.addEventListener('beforeunload', () => {
@@ -2818,8 +3039,22 @@ function stopPolling() {
   pollTimers = [];
 }
 
+// 安卓返回键：先退出全屏/大屏/弹窗，返回 false 时由原生处理（返回上一页或退到后台）。
+window.__imiBack = () => {
+  if (document.body.classList.contains('wall')) { exitWall(); return true; }
+  // 单画面查看默认就是全屏，返回键直接关掉它（closeViewer 会恢复系统栏）
+  if (state.viewer) { closeViewer(); return true; }
+  if ($('#qualityMenu')?.classList.contains('open')) { $('#qualityMenu').classList.remove('open'); return true; }
+  if ($('#layoutMenu')?.classList.contains('on')) { closeLayoutMenu(); return true; }
+  if ($('#modalSettings')?.classList.contains('open')) { closeSettings(); return true; }
+  if ($('#modalLogin')?.classList.contains('open')) { closeAdd(); return true; }
+  return false;
+};
+
 async function init() {
   bindEvents();
+  // 页面重新加载时恢复系统栏（避免壳里残留全屏状态）
+  setNativeFullscreen(false);
 
   // 老版本默认是 2×2 + 16:9；升级到左右分栏后只迁移一次到单路铺满
   const savedSettings = loadJSON('imi.settings', {});

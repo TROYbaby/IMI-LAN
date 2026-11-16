@@ -53,6 +53,8 @@ html, body { height: 100%; }
 body {
   margin: 0;
   overflow: hidden;
+  /* 禁止双击缩放；保留双指缩放，避免影响无障碍/浏览器用户。只有单画面开启「放大镜」后，画面区域才接管双指手势 */
+  touch-action: manipulation;
   background: var(--bg);
   color: var(--text);
   font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", system-ui, sans-serif;
@@ -436,7 +438,7 @@ body.wall .grid { grid-template-rows: none !important; }
 .card-media video-stream .info { display: none; }
 
 /* 画面缩放/平移 */
-.card-media.zoom-on, .viewer-stage.zoom-on { cursor: grab; }
+.card-media.zoom-on, .viewer-stage.zoom-on { cursor: grab; touch-action: none; }
 .card-media.zoom-on.zoom-drag, .viewer-stage.zoom-on.zoom-drag { cursor: grabbing; }
 .card-media.zoom-on .card-tools, .card-media.zoom-on .card-tools *,
 .card-media.zoom-on .card-menu-btn, .card-media.zoom-on .hero-expand { cursor: pointer; }
@@ -474,7 +476,11 @@ body.wall .grid { grid-template-rows: none !important; }
 .zoom-hud button[data-zoom="reset"] { min-width: 42px; font: 9.5px var(--mono); color: rgba(255, 255, 255, 0.82); }
 .zoom-hud button[data-zoom="reset"].at-fit { color: rgba(255, 255, 255, 0.45); }
 .viewer-stage { overflow: hidden; }
-.viewer-stage .zoom-hud { top: 76px; right: 18px; padding: 4px; }
+.viewer-stage .zoom-hud {
+  top: calc(108px + env(safe-area-inset-top, 0px));
+  right: calc(18px + env(safe-area-inset-right, 0px));
+  padding: 4px;
+}
 
 .card-mask {
   position: absolute;
@@ -716,7 +722,7 @@ body.wall .grid { grid-template-rows: none !important; }
 
 .modal.viewer { padding: 0; background: #000; display: none; }
 .modal.viewer.open { display: block; }
-.viewer-stage { position: absolute; inset: 0; background: #000; }
+.viewer-stage { position: absolute; inset: 0; background: #000; touch-action: manipulation; }
 .viewer-stage video-stream { position: absolute; inset: 0; width: 100%; height: 100%; }
 .viewer-stage video { width: 100%; height: 100%; object-fit: contain; background: #000; }
 .viewer-sleep { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; color: rgba(255, 255, 255, 0.6); background: #05080b; }
@@ -730,7 +736,9 @@ body.wall .grid { grid-template-rows: none !important; }
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 14px 18px 34px;
+  padding: calc(14px + env(safe-area-inset-top, 0px))
+    calc(18px + env(safe-area-inset-right, 0px)) 34px
+    calc(18px + env(safe-area-inset-left, 0px));
   background: linear-gradient(180deg, rgba(0, 0, 0, 0.74), transparent);
   color: #fff;
 }
@@ -753,7 +761,8 @@ body.wall .grid { grid-template-rows: none !important; }
 
 .quality-menu {
   position: absolute;
-  top: 64px; right: 18px;
+  top: calc(64px + env(safe-area-inset-top, 0px));
+  right: calc(18px + env(safe-area-inset-right, 0px));
   z-index: 12;
   display: none;
   flex-direction: column;
@@ -775,7 +784,9 @@ body.wall .grid { grid-template-rows: none !important; }
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 30px 20px 14px;
+  padding: 30px calc(20px + env(safe-area-inset-right, 0px))
+    calc(14px + env(safe-area-inset-bottom, 0px))
+    calc(20px + env(safe-area-inset-left, 0px));
   background: linear-gradient(0deg, rgba(0, 0, 0, 0.76), transparent);
   color: rgba(255, 255, 255, 0.62);
   font-size: 9.5px;
@@ -789,6 +800,13 @@ body.wall .grid { grid-template-rows: none !important; }
 .viewer-chips .dot.err { background: var(--danger); }
 .viewer-chips .dot.warn { background: var(--warn); }
 .viewer-clock { flex: none; font-family: var(--mono); color: rgba(255, 255, 255, 0.62); }
+
+/* 单击画面进入沉浸：隐藏顶部与底部控件，再点一次恢复 */
+.viewer-top, .viewer-bottom { transition: opacity 0.18s ease, transform 0.18s ease; }
+#modalViewer.chrome-off .viewer-top,
+#modalViewer.chrome-off .viewer-bottom { opacity: 0; pointer-events: none; }
+#modalViewer.chrome-off .viewer-top { transform: translateY(-10px); }
+#modalViewer.chrome-off .viewer-bottom { transform: translateY(10px); }
 
 /* ---------- modal / login ---------- */
 
@@ -943,15 +961,35 @@ body.wall .toast { display: none !important; }
 body.wall .app { grid-template-columns: 1fr; }
 body.wall .stage-body { padding: 0; }
 body.wall .grid { gap: 0; height: 100%; grid-template-columns: repeat(var(--grid-cols, 2), minmax(0, 1fr)) !important; grid-auto-rows: minmax(0, 1fr) !important; align-content: stretch; justify-content: stretch; }
-body.wall .card { border: 0; border-radius: 0; box-shadow: none; animation: none; background: #000; }
+/* 卡片撑满单元格；单路布局下 card 原本是 block，这里统一改成 flex 纵向，
+   否则画面会按 16:9 停在中间、下面留一条黑边。 */
+body.wall .card { display: flex; flex-direction: column; min-height: 0; border: 0; border-radius: 0; box-shadow: none; animation: none; background: #000; }
 body.wall .card-head,
 body.wall .card-foot,
 body.wall .card-tools,
 body.wall .card-menu-btn,
 body.wall .card-hero-info,
 body.wall .card-mask { display: none !important; }
-body.wall .card-media { flex: 1 1 0 !important; aspect-ratio: auto !important; min-height: 0; position: relative !important; inset: auto !important; }
-body.wall .card-media video { object-fit: cover; }
+body.wall .card-media { flex: 1 1 0 !important; height: 0; aspect-ratio: auto !important; min-height: 0; position: relative !important; inset: auto !important; }
+
+/* 全屏时系统栏和网页顶栏都隐藏了，留一个轻量的退出按钮（返回键、双击也可以退出） */
+.wall-exit {
+  display: none;
+  position: fixed;
+  top: calc(12px + env(safe-area-inset-top, 0px));
+  right: calc(12px + env(safe-area-inset-right, 0px));
+  z-index: 250;
+  width: 40px; height: 40px;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  background: rgba(7, 12, 19, 0.45);
+  color: rgba(255, 255, 255, 0.78);
+  backdrop-filter: blur(8px);
+}
+.wall-exit:hover { background: rgba(7, 12, 19, 0.72); color: #fff; }
+.wall-exit .ic { width: 18px; height: 18px; }
+body.wall .wall-exit { display: grid; }
 
 @media (max-width: 1180px) {
   .engine { display: none; }
@@ -982,4 +1020,30 @@ body.wall .card-media video { object-fit: cover; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}
+
+/* ---------- touch ---------- */
+
+/* 触屏设备加大可点区域；平板配合 viewport 放大，按钮接近 48dp 的触控标准。 */
+@media (pointer: coarse) {
+  .icon-btn { width: 40px; height: 40px; }
+  .icon-btn .ic { width: 20px; height: 20px; }
+  .layout-btn { height: 40px; padding: 0 11px; }
+  .add-btn { height: 40px; padding: 0 14px; }
+  .account { height: 44px; }
+  .card-menu-btn, .hero-expand { width: 40px; height: 40px; }
+  .tool { width: 38px; height: 38px; }
+  .btn { min-height: 40px; padding: 9px 14px; }
+  .btn.small { min-height: 34px; padding: 7px 12px; }
+  .modal-close { width: 40px; height: 40px; }
+  .login-tab { padding: 11px 12px; }
+  .seg button { height: 34px; }
+  .viewer-actions .icon-btn { width: 40px; height: 40px; }
+  .quality-btn { height: 36px; padding: 0 10px; }
+  .viewer-chips button { height: 30px; padding: 0 11px; }
+  .foot-tools button { width: 32px; height: 32px; }
+  .device { padding: 12px; }
+  .device input, .switch input { width: 18px; height: 18px; }
+  .settings-row { padding: 13px 12px; }
+  .layout-tiles button { height: 66px; }
 }
