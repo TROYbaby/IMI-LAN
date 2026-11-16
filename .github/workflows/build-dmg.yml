@@ -1,0 +1,104 @@
+name: Build macOS DMG
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-dmg:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          # go2rtc v1.9.15 的 go.mod 要求 go 1.26；源码在 job 内才下载，所以没有 go.sum 可做缓存
+          go-version: "1.26.x"
+          cache: false
+
+      - name: Prepare vendor files (engine / config / helper / web UI)
+        run: |
+          set -euo pipefail
+          rm -rf desktop/vendor
+          mkdir -p desktop/vendor
+
+          # 用入库的 mac 模板，不能用本地 go2rtc.yaml（被 .gitignore 排除，且含真实凭据）
+          cp desktop/go2rtc.mac.yaml desktop/vendor/go2rtc.yaml
+          if grep -Eq 'passToken|192\.168\.' desktop/vendor/go2rtc.yaml; then
+            echo "::error::vendor/go2rtc.yaml 里出现真实凭据，拒绝打包"
+            exit 1
+          fi
+          cp qr-login.js desktop/vendor/qr-login.js
+          cp -R web desktop/vendor/web
+
+          # 引擎与 Windows / fnOS / 安卓同源：下载 go2rtc v1.9.15 源码，打 xiaomi-login 补丁后
+          # 交叉编译成 darwin 两个架构再 lipo 合并。不能用官方 release 二进制——那里面没有补丁，
+          # 读不到扫码保存的 xiaomi-credentials，只能退回老的 passToken 登录（很快会被风控 70016）。
+          V=1.9.15
+          SRC_SHA256=08901ecc03ec031b1af13268e6e62370ba7f887b30f98866624d683e0486c084
+          curl -fsSL --retry 3 -o /tmp/go2rtc-src.tar.gz \
+            "https://github.com/AlexxIT/go2rtc/archive/refs/tags/v${V}.tar.gz"
+          echo "$SRC_SHA256  /tmp/go2rtc-src.tar.gz" | shasum -a 256 -c -
+          mkdir -p /tmp/go2rtc-src
+          tar -xzf /tmp/go2rtc-src.tar.gz -C /tmp/go2rtc-src
+          (
+            cd "/tmp/go2rtc-src/go2rtc-${V}"
+            git apply -p1 --whitespace=nowarn "${GITHUB_WORKSPACE}/fpk/patches/xiaomi-login.patch"
+            for arch in amd64 arm64; do
+              CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" \
+                go build -trimpath -ldflags "-s -w" -o "/tmp/go2rtc-$arch" .
+            done
+          )
+          lipo -create /tmp/go2rtc-amd64 /tmp/go2rtc-arm64 -output desktop/vendor/go2rtc
+          chmod +x desktop/vendor/go2rtc
+          file desktop/vendor/go2rtc
+          # 补丁没进去就直接失败，避免又发一个行为不一致的包
+          if ! grep -qa 'xiaomi-credentials' desktop/vendor/go2rtc; then
+            echo "::error::go2rtc 没有打上 fpk/patches/xiaomi-login.patch"
+            exit 1
+          fi
+          # 由 assets/icon.png 生成 icns（iconutil 为 macOS 自带工具）
+          mkdir -p desktop/assets/icon.iconset
+          SRC=desktop/assets/icon.png
+          for s in 16 32 128 256 512; do
+            sips -z $s $s "$SRC" --out "desktop/assets/icon.iconset/icon_${s}x${s}.png" >/dev/null
+          done
+          sips -z 32 32 "$SRC" --out desktop/assets/icon.iconset/icon_16x16@2x.png >/dev/null
+          sips -z 64 64 "$SRC" --out desktop/assets/icon.iconset/icon_32x32@2x.png >/dev/null
+          sips -z 256 256 "$SRC" --out desktop/assets/icon.iconset/icon_128x128@2x.png >/dev/null
+          sips -z 512 512 "$SRC" --out desktop/assets/icon.iconset/icon_256x256@2x.png >/dev/null
+          sips -z 1024 1024 "$SRC" --out desktop/assets/icon.iconset/icon_512x512@2x.png >/dev/null
+          iconutil -c icns desktop/assets/icon.iconset -o desktop/assets/icon.icns
+          rm -rf desktop/assets/icon.iconset
+
+      - name: Install dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Build DMG
+        working-directory: desktop
+        env:
+          # 无签名证书；afterPack 钩子里做 ad-hoc 签名
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        run: npm run pack:mac
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: IMI-LAN-mac-dmg
+          path: desktop/dist-mac/*.dmg
+          if-no-files-found: error

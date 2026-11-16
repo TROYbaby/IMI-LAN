@@ -1,0 +1,26 @@
+# macOS 打包用配置模板（CI 复制到 desktop/vendor/go2rtc.yaml，随 .app 一起分发）
+# 与根目录 go2rtc.yaml.example 保持一致，但不含 Windows 专用的 ffmpeg 段：
+# mac 包不附 ffmpeg，摄像头走平台硬件解码（H.265）。
+# 首次启动会把这个文件复制到 ~/Library/Application Support/IMI-LAN/go2rtc.yaml，
+# 之后的登录令牌和摄像头流都写在那里，升级不会丢。
+api:
+  listen: "127.0.0.1:19840"
+  static_dir: "web"
+
+rtsp:
+  listen: "127.0.0.1:8554"
+
+webrtc:
+  listen: "127.0.0.1:8555"
+
+log:
+  level: info
+
+# 登录令牌：扫码或密码登录成功后，由 qr-login.js 写入「小米账号 ID -> passToken」
+# 这一行必须独占一行、后面不接任何值，qr-login.js 才能识别并写进来
+xiaomi:
+
+# 摄像头流地址由网页里的「添加摄像头」写入，形如：
+#   cam_1000000001:
+#     - xiaomi://100000000:cn@192.0.2.10?did=1000000001&model=chuangmi.camera.029a02&subtype=2
+streams:

@@ -5,12 +5,36 @@ const fs = require('fs');
 const http = require('http');
 const net = require('net');
 
-const ROOT = app.isPackaged ? path.dirname(process.execPath) : path.resolve(__dirname, '..');
-const LOG_DIR = app.isPackaged ? ROOT : __dirname;
-const ENGINE = path.join(ROOT, 'go2rtc.exe');
-const CONFIG = path.join(ROOT, 'go2rtc.yaml');
+const IS_WIN = process.platform === 'win32';
+const IS_MAC = process.platform === 'darwin';
+// Windows：资源在 exe 旁边；macOS：资源在 .app 包内 Contents/Resources，日志写到 ~/Library/Logs
+const ROOT = app.isPackaged
+  ? (IS_MAC ? process.resourcesPath : path.dirname(process.execPath))
+  : path.resolve(__dirname, '..');
+const LOG_DIR = app.isPackaged
+  ? (IS_MAC ? app.getPath('logs') : path.dirname(process.execPath))
+  : __dirname;
+const ENGINE = path.join(ROOT, IS_WIN ? 'go2rtc.exe' : 'go2rtc');
+// .app 包内是只读的、升级时会被整个替换，可写配置必须放到用户目录
+// （Windows 便携版仍是 exe 旁边的 go2rtc.yaml，行为不变）
+const DATA_DIR = app.isPackaged && IS_MAC ? app.getPath('userData') : ROOT;
+const CONFIG = path.join(DATA_DIR, 'go2rtc.yaml');
 const QR_SCRIPT = path.join(ROOT, 'qr-login.js');
 const FW_BAT = path.join(ROOT, '修复网络权限（桌面版）.bat');
+
+// 首次运行：建日志目录，并把包内的默认配置复制到可写目录
+function ensureDataDir() {
+  try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch {}
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
+  try {
+    if (fs.existsSync(CONFIG)) return;
+    const seed = path.join(ROOT, 'go2rtc.yaml');
+    if (path.resolve(seed) !== path.resolve(CONFIG) && fs.existsSync(seed)) {
+      fs.copyFileSync(seed, CONFIG);
+    }
+  } catch {}
+}
+ensureDataDir();
 
 function readApiPort() {
   try {
@@ -32,7 +56,8 @@ function migrateLegacyApiPort() {
     const text = fs.readFileSync(CONFIG, 'utf8');
     if (!/listen:\s*"127\.0\.0\.1:1984"/.test(text)) return;
     const next = text.replace(/listen:\s*"127\.0\.0\.1:1984"/, 'listen: "127.0.0.1:19840"');
-    const tmp = CONFIG + '.tmp';
+    // 带 PID：go2rtc 自己写配置时也用 <config>.tmp，避免互相覆盖
+    const tmp = `${CONFIG}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, next, { encoding: 'utf8', mode: 0o600 });
     fs.renameSync(tmp, CONFIG);
   } catch {}
@@ -160,13 +185,13 @@ async function startEngine() {
     return true;
   }
   if (!fs.existsSync(ENGINE)) {
-    dialog.showErrorBox('找不到 go2rtc.exe', '请把 Electron 应用放在 imi-lan 目录内。');
+    dialog.showErrorBox('找不到 go2rtc 引擎', IS_WIN ? '请把 Electron 应用放在 imi-lan 目录内。' : '应用安装不完整，请重新下载 DMG。');
     return false;
   }
   spawnEngine();
   const ok = await waitEngine(20000);
   if (!ok) {
-    dialog.showErrorBox('引擎启动失败', '请检查 go2rtc.exe 和 go2rtc.yaml，或运行「启动监控.bat」。');
+    dialog.showErrorBox('引擎启动失败', '请检查 go2rtc 配置' + (IS_WIN ? '，或运行「启动监控.bat」。' : '，日志见 ~/Library/Logs/IMI-LAN。'));
   }
   return ok;
 }
@@ -236,7 +261,15 @@ async function startHelper() {
       cwd: ROOT,
       windowsHide: true,
       stdio: 'ignore',
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      env: {
+        ...process.env,
+        ELECTRON_RUN_AS_NODE: '1',
+        // 助手默认找 go2rtc.exe，mac 包里的引擎叫 go2rtc，这里显式指定
+        IMI_GO2RTC_BIN: ENGINE,
+        IMI_LOG_DIR: LOG_DIR,
+        // mac 的配置在用户目录，不传的话助手会写回只读的 .app 包内
+        IMI_CONFIG: CONFIG,
+      },
     });
     helper = child;
     helperOwned = true;
@@ -367,7 +400,7 @@ function createTray() {
       label: '重启引擎',
       click: async () => {
         const ok = await restartEngine();
-        if (!ok) dialog.showErrorBox('重启失败', '请检查 go2rtc 配置，或运行「启动监控.bat」。');
+        if (!ok) dialog.showErrorBox('重启失败', '请检查 go2rtc 配置' + (IS_WIN ? '，或运行「启动监控.bat」。' : '，日志见 ~/Library/Logs/IMI-LAN。'));
       },
     },
     ...(app.isPackaged ? [{
@@ -376,13 +409,16 @@ function createTray() {
       checked: app.getLoginItemSettings().openAtLogin,
       click: item => {
         try {
-          app.setLoginItemSettings({ openAtLogin: item.checked, path: process.execPath });
+          const settings = { openAtLogin: item.checked };
+          // path 只对 Windows 有意义；macOS 上不传
+          if (IS_WIN) settings.path = process.execPath;
+          app.setLoginItemSettings(settings);
         } catch (e) {
           dialog.showErrorBox('设置失败', e.message);
         }
       },
     }] : []),
-    { label: '修复网络权限（管理员）', click: () => shell.openPath(FW_BAT) },
+    ...(IS_WIN ? [{ label: '修复网络权限（管理员）', click: () => shell.openPath(FW_BAT) }] : []),
     { label: '打开程序目录', click: () => shell.openPath(ROOT) },
     { type: 'separator' },
     { label: '退出', click: () => { quitting = true; app.quit(); } },

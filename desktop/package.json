@@ -9,11 +9,59 @@
   "scripts": {
     "start": "electron .",
     "probe": "electron . --probe",
-    "pack:portable": "electron-packager . IMI-LAN --platform=win32 --arch=x64 --out=dist --overwrite --icon=assets/icon.ico --asar --ignore=node_modules --ignore=dist --ignore=probe.json --ignore=probe.png --ignore=engine.log"
+    "pack:portable": "electron-packager . IMI-LAN --platform=win32 --arch=x64 --out=dist --overwrite --icon=assets/icon.ico --asar --ignore=node_modules --ignore=dist --ignore=probe.json --ignore=probe.png --ignore=engine.log",
+    "pack:mac": "electron-builder --mac"
   },
   "devDependencies": {
     "@electron/packager": "^20.3.0",
     "electron": "^45.2.3",
+    "electron-builder": "^26.0.0",
     "png-to-ico": "^3.0.2"
+  },
+  "build": {
+    "appId": "com.imilan.desktop",
+    "productName": "IMI-LAN",
+    "directories": {
+      "output": "dist-mac"
+    },
+    "files": [
+      "main.js",
+      "assets/**"
+    ],
+    "extraResources": [
+      {
+        "from": "vendor/go2rtc",
+        "to": "go2rtc"
+      },
+      {
+        "from": "vendor/go2rtc.yaml",
+        "to": "go2rtc.yaml"
+      },
+      {
+        "from": "vendor/qr-login.js",
+        "to": "qr-login.js"
+      },
+      {
+        "from": "vendor/web",
+        "to": "web"
+      }
+    ],
+    "afterPack": "scripts/afterpack.js",
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        }
+      ],
+      "icon": "assets/icon.icns",
+      "identity": null,
+      "category": "public.app-category.photography"
+    },
+    "dmg": {
+      "title": "IMI-LAN ${version}"
+    }
   }
 }

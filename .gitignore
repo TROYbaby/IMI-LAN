@@ -18,7 +18,12 @@ bin/
 # 桌面版构建产物与依赖
 desktop/node_modules/
 desktop/dist/
+desktop/dist-mac/
 desktop/out/
+# 打包中间产物：vendor/go2rtc.yaml 由本机配置生成，可能含真实凭据
+desktop/vendor/
+desktop/assets/icon.icns
+desktop/assets/icon.iconset/
 
 # fnOS fpk 构建产物与缓存
 fpk/.build/

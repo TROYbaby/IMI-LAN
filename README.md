@@ -103,8 +103,20 @@ Windows 桌面版从 [Releases](https://github.com/pigstrong9/IMI-LAN/releases) 
 说明：
 
 - 安装目录里有一份 `go2rtc.yaml`（含 token）和 `web`，和项目根目录是两份，互不影响；不要把整个安装目录压缩发给别人，请让对方下载 Release 安装包。
+- **本机 API 没有额外认证**：Windows 桌面版让窗口直连 `127.0.0.1:19840`，go2rtc 只监听回环地址但没开 `local_auth`，同机其它进程可以通过 `/api/config` 读走含小米令牌的配置。安卓版和 fnOS 版走网关（访问密码 / `imi_app` 令牌 + go2rtc Basic Auth），没有这个口子。如果电脑上跑着不受信任的软件，可以改用安卓版或 fnOS 版。
 - exe 未签名，Windows SmartScreen 可能提示，选「更多信息 → 仍要运行」。
 - 源码在 `desktop/`，`node_modules` 是构建依赖（约 250MB）；`desktop/package.json` 的 `pack:portable` 可生成便携版目录，需自行补齐 `go2rtc.exe`、配置、`web`、`qr-login.js` 和两个防火墙 bat。Release 里的安装程序由 NSIS 在该目录基础上打包生成。
+
+### macOS（DMG）
+
+macOS 版由 `.github/workflows/build-dmg.yml` 在 GitHub Actions 上构建（Intel / Apple Silicon 通用二进制），首次打开会被 Gatekeeper 拦截，需右键 →「打开」。
+
+- 可写配置在 `~/Library/Application Support/IMI-LAN/go2rtc.yaml`，首次启动从应用包内复制；升级或覆盖安装不会丢登录令牌和摄像头
+- 日志在 `~/Library/Logs/IMI-LAN/`（`engine.log`、`qr-login.log`）
+- 包内引擎与 Windows / fnOS / 安卓同源：CI 下载 go2rtc v1.9.15 源码、打 `fpk/patches/xiaomi-login.patch` 后交叉编译，再用 `lipo` 合并成通用二进制；不要换成官方 release 二进制，那里面没有补丁，读不到扫码保存的 `xiaomi-credentials`
+- 和 Windows 版一样，本机 `127.0.0.1:19840` 的 go2rtc API 没有额外认证，同机进程能读到配置
+- 本地构建：`cd desktop && npm ci`，按 workflow 的「Prepare vendor files」准备 `vendor/`（引擎、配置、`web`、`qr-login.js`），再 `npm run pack:mac`
+- 包内引擎与配置模板见 `desktop/go2rtc.mac.yaml`，不要用本地 `go2rtc.yaml`（含真实凭据，已被 `.gitignore` 排除）
 
 ## fnOS（飞牛）版
 
