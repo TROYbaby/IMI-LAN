@@ -1,0 +1,25 @@
+# Windows 打包用配置模板（打包时复制成 vendor/go2rtc.yaml，随安装包分发）
+# 安装后这份空配置留在安装目录，扫码登录的 token 和摄像头都写进同一份文件。
+# 不要用仓库根目录的 go2rtc.yaml（含真实凭据，已被 .gitignore 排除）。
+# 不附 ffmpeg：H.265 走浏览器原生解码，需要转码时请自行补 bin/ffmpeg.exe 并加 ffmpeg 段。
+api:
+  listen: "127.0.0.1:19840"
+  static_dir: "web"
+
+rtsp:
+  listen: "127.0.0.1:8554"
+
+webrtc:
+  listen: "127.0.0.1:8555"
+
+log:
+  level: info
+
+# 登录令牌：扫码或密码登录成功后，由 qr-login.js 写入「小米账号 ID -> passToken」
+# 这一行必须独占一行、后面不接任何值，qr-login.js 才能识别并写进来
+xiaomi:
+
+# 摄像头流地址由网页里的「添加摄像头」写入，形如：
+#   cam_1000000001:
+#     - xiaomi://100000000:cn@192.0.2.10?did=1000000001&model=chuangmi.camera.029a02&subtype=2
+streams:

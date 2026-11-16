@@ -1,6 +1,6 @@
 {
   "name": "imi-lan-desktop",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "description": "IMI-LAN · 局域网直连桌面版",
   "author": "imi-lan",
@@ -10,6 +10,7 @@
     "start": "electron .",
     "probe": "electron . --probe",
     "pack:portable": "electron-packager . IMI-LAN --platform=win32 --arch=x64 --out=dist --overwrite --icon=assets/icon.ico --asar --ignore=node_modules --ignore=dist --ignore=probe.json --ignore=probe.png --ignore=engine.log",
+    "pack:win": "electron-builder --win nsis",
     "pack:mac": "electron-builder --mac"
   },
   "devDependencies": {
@@ -22,31 +23,56 @@
     "appId": "com.imilan.desktop",
     "productName": "IMI-LAN",
     "directories": {
-      "output": "dist-mac"
+      "output": "dist"
     },
     "files": [
       "main.js",
       "assets/**"
     ],
-    "extraResources": [
-      {
-        "from": "vendor/go2rtc",
-        "to": "go2rtc"
-      },
-      {
-        "from": "vendor/go2rtc.yaml",
-        "to": "go2rtc.yaml"
-      },
-      {
-        "from": "vendor/qr-login.js",
-        "to": "qr-login.js"
-      },
-      {
-        "from": "vendor/web",
-        "to": "web"
-      }
-    ],
     "afterPack": "scripts/afterpack.js",
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "artifactName": "IMI-LAN-Setup-${version}-win-${arch}.${ext}",
+      "extraFiles": [
+        {
+          "from": "vendor/go2rtc.exe",
+          "to": "go2rtc.exe"
+        },
+        {
+          "from": "vendor/go2rtc.yaml",
+          "to": "go2rtc.yaml"
+        },
+        {
+          "from": "vendor/qr-login.js",
+          "to": "qr-login.js"
+        },
+        {
+          "from": "vendor/web",
+          "to": "web"
+        },
+        {
+          "from": "../修复网络权限（桌面版）.bat",
+          "to": "修复网络权限（桌面版）.bat"
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "米家监控",
+      "uninstallDisplayName": "IMI-LAN 米家监控"
+    },
     "mac": {
       "target": [
         {
@@ -58,7 +84,26 @@
       ],
       "icon": "assets/icon.icns",
       "identity": null,
-      "category": "public.app-category.photography"
+      "category": "public.app-category.photography",
+      "artifactName": "IMI-LAN-${version}-mac-${arch}.${ext}",
+      "extraResources": [
+        {
+          "from": "vendor/go2rtc",
+          "to": "go2rtc"
+        },
+        {
+          "from": "vendor/go2rtc.yaml",
+          "to": "go2rtc.yaml"
+        },
+        {
+          "from": "vendor/qr-login.js",
+          "to": "qr-login.js"
+        },
+        {
+          "from": "vendor/web",
+          "to": "web"
+        }
+      ]
     },
     "dmg": {
       "title": "IMI-LAN ${version}"

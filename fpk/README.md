@@ -42,8 +42,8 @@ python fpk/build.py --go /path/to/go
 产物：
 
 ```text
-fpk/dist/imi-lan_1.0.1_x86.fpk
-fpk/dist/imi-lan_1.0.1_x86.fpk.sha256
+fpk/dist/imi-lan_1.0.2_x86.fpk
+fpk/dist/imi-lan_1.0.2_x86.fpk.sha256
 ```
 
 构建脚本做了这些事：
@@ -57,7 +57,7 @@ fpk/dist/imi-lan_1.0.1_x86.fpk.sha256
 
 ```bash
 # 覆盖版本号
-python fpk/build.py --go /path/to/go --version 1.0.1
+python fpk/build.py --go /path/to/go --version 1.0.2
 
 # 把 Linux x86_64 版 ffmpeg 一起打进去（H.265 转码兜底）
 python fpk/build.py --go /path/to/go --ffmpeg /path/to/ffmpeg

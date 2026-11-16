@@ -59,7 +59,7 @@ keyPassword=...
 ## 安装与使用
 
 ```powershell
-adb install -r android/dist/imi-lan_1.0.1_arm64_debug.apk
+adb install -r android/dist/imi-lan_1.0.2_arm64_debug.apk
 ```
 
 或把 APK 拷到手机上点击安装（需要允许「安装未知应用」）。

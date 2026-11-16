@@ -7,7 +7,7 @@ on:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-dmg:
@@ -38,7 +38,9 @@ jobs:
 
           # 用入库的 mac 模板，不能用本地 go2rtc.yaml（被 .gitignore 排除，且含真实凭据）
           cp desktop/go2rtc.mac.yaml desktop/vendor/go2rtc.yaml
-          if grep -Eq 'passToken|192\.168\.' desktop/vendor/go2rtc.yaml; then
+          # 只检查非注释行：模板注释里本来就有 passToken 字样，整文件 grep 会误报
+          if grep -Ev '^[[:space:]]*(#|$)' desktop/vendor/go2rtc.yaml \
+              | grep -Eq 'passToken|serviceToken|ssecurity|192\.168\.'; then
             echo "::error::vendor/go2rtc.yaml 里出现真实凭据，拒绝打包"
             exit 1
           fi
@@ -100,5 +102,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: IMI-LAN-mac-dmg
-          path: desktop/dist-mac/*.dmg
+          path: desktop/dist/*.dmg
           if-no-files-found: error
+
+      # tag 推送时 Release 已经由本地 gh 提前建好，这里把 DMG 补上去
+      - name: Upload DMG to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" desktop/dist/*.dmg --clobber
