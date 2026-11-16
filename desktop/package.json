@@ -85,6 +85,7 @@
       "icon": "assets/icon.icns",
       "identity": null,
       "category": "public.app-category.photography",
+      "x64ArchFiles": "Contents/Resources/go2rtc",
       "artifactName": "IMI-LAN-${version}-mac-${arch}.${ext}",
       "extraResources": [
         {
