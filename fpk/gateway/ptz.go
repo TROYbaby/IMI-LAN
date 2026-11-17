@@ -432,7 +432,13 @@ func (s *qrService) missCommand(src string, cmd uint32, data string) (string, er
 
 	res, err := s.apiClient(6 * time.Second).Do(req)
 	if err != nil {
-		return "", fmt.Errorf("播放引擎没有响应：%v", err)
+		// url.Error 会把整条 http://127.0.0.1:xxxxx/api/...?data=%7B... 拽进来，
+		// 这句话是要上手机屏幕的。只留根因。
+		var uerr *url.Error
+		if errors.As(err, &uerr) && uerr.Err != nil {
+			return "", fmt.Errorf("播放引擎没有响应（%v）", uerr.Err)
+		}
+		return "", fmt.Errorf("播放引擎没有响应（%v）", err)
 	}
 	defer res.Body.Close()
 

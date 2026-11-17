@@ -3919,6 +3919,22 @@ async function ptzProbe(name) {
   if (seq === ptz.probing) ptzRender();
 }
 
+// 云台失败原因五花八门，直接把后端原文弹出来会是一条带着
+// 127.0.0.1:xxxxx 和 Go 运行时措辞的长串 —— 用户看不懂，还挡住画面。
+// 归成几句人话，兜底也截断。
+function ptzErrText(msg) {
+  const m = String(msg || '').trim();
+  if (/timeout|deadline|没有响应|request canceled|EOF/i.test(m)) {
+    return '云台指令没送出去，重连一下画面再试';
+  }
+  if (/还没连上|409/.test(m)) return '画面还没连上摄像机，等画面出来再按';
+  if (/没有云台命令接口|405/.test(m)) return '这个播放引擎不带云台命令，需要新版';
+  if (/这个画面|404/.test(m)) return '画面名对不上，刷新一下再试';
+  if (!m) return '云台指令失败';
+  const one = m.split('\n')[0];
+  return one.length > 48 ? one.slice(0, 48) + '…' : one;
+}
+
 async function ptzMove(dir) {
   if (!ptz.name) return;
   const real = ptzFlipDir(dir);        // 吊装/倒装时把方向镜像回去
@@ -3936,7 +3952,7 @@ async function ptzMove(dir) {
     // 长按会连续发指令，失败只提示一次，避免刷屏
     if (Date.now() - ptz.lastErrorAt > 4000) {
       ptz.lastErrorAt = Date.now();
-      toast('云台：' + e.message, true);
+      toast(ptzErrText(e.message), true);
     }
   } finally {
     pad?.classList.remove('busy');
