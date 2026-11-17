@@ -937,6 +937,12 @@ body.wall .grid { grid-template-rows: none !important; }
 .drawer-head h2 { margin: 0; font-size: 18px; font-weight: 650; }
 .drawer-head p { margin: 4px 0 0; color: var(--dim); font-size: 10.5px; }
 .drawer-body { margin-top: 20px; }
+/* 设置分类页签：三段等宽，跟下面的 .seg 同一种圆角语言，但底宽铺满 */
+.drawer-tabs { display: flex; gap: 3px; padding: 3px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.drawer-tabs button { flex: 1; height: 34px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-size: 12px; font-weight: 500; }
+.drawer-tabs button:hover { color: var(--text); }
+.drawer-tabs button.on { color: var(--blue); background: color-mix(in srgb, var(--blue) 12%, transparent); }
+.set-pane { padding-top: 4px; }
 .set-sec { padding: 14px 0 16px; border-bottom: 1px solid var(--line); }
 .set-label { display: block; margin-bottom: 9px; color: var(--dim); font-family: var(--mono); font-size: 8.5px; letter-spacing: 0.14em; text-transform: uppercase; }
 
@@ -959,7 +965,8 @@ body.wall .grid { grid-template-rows: none !important; }
 .switch { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
 .switch input { width: 14px; height: 14px; accent-color: var(--blue); }
 .settings-actions { display: flex; gap: 7px; flex-wrap: wrap; margin: 14px 0; }
-.drawer-body > .muted { margin: 0; }
+.drawer-body > .muted,
+.set-pane > .muted { margin: 8px 0 0; }
 .drawer-body { scrollbar-width: thin; scrollbar-color: var(--line-2) transparent; }
 .drawer-body::-webkit-scrollbar { width: 5px; }
 .drawer-body::-webkit-scrollbar-thumb { border-radius: 3px; background: var(--line-2); }
@@ -986,6 +993,9 @@ body.wall .grid { grid-template-rows: none !important; }
   pointer-events: none;
   transition: 0.18s ease;
 }
+/* 单画面开方向盘时，提示条会压在方向键上：「松手停」这类提示本来就在
+   最容易误触的那几秒出现。抬到方向盘上方。 */
+body.ptz-on .toast { bottom: 224px; }
 .toast.on { opacity: 1; transform: translate(-50%, 0); }
 .toast.err { color: #ffb0b8; border-color: rgba(255, 99, 115, 0.4); }
 
@@ -1291,6 +1301,8 @@ body.wall .wall-exit { display: grid; }
   /* 抽屉内部自己滚，别把滚动传给背后的页面；底部多留一截，最后一行不会卡在屏幕边缘 */
   .drawer-panel { overscroll-behavior: contain; scroll-padding-bottom: 24px; }
   .drawer-body { padding-bottom: 8px; }
+  .drawer-tabs { margin-top: 2px; }
+  .drawer-tabs button { height: 40px; font-size: 13px; }
   .set-sec { padding: 16px 0; }
   .btn { min-height: var(--m-touch); }
   .settings-list .settings-row { padding: 14px 0; }
@@ -1539,6 +1551,19 @@ body.wall .wall-exit { display: grid; }
 .ptz-btn.on .ic,
 .ptz-btn:active .ic { opacity: 1; }
 /* 默认朝上，按方向旋转；斜向按钮在型号不支持时由 JS 直接隐藏 */
+/* 每个方向显式占格：斜向按钮被 hidden 后若靠自动排布，剩下的键会挤到
+   前两格（上键跑到左上、收起键跑到右上），方向盘就不是十字了。
+   grid 自动流对 display:none 的项不留坑，所以位置必须写死。 */
+.ptz-btn[data-move="left_up"] { grid-area: 1 / 1; }
+.ptz-btn[data-move="up"] { grid-area: 1 / 2; }
+.ptz-btn[data-move="right_up"] { grid-area: 1 / 3; }
+.ptz-btn[data-move="left"] { grid-area: 2 / 1; }
+.ptz-hub { grid-area: 2 / 2; }
+.ptz-btn[data-move="right"] { grid-area: 2 / 3; }
+.ptz-btn[data-move="left_down"] { grid-area: 3 / 1; }
+.ptz-btn[data-move="down"] { grid-area: 3 / 2; }
+.ptz-btn[data-move="right_down"] { grid-area: 3 / 3; }
+
 .ptz-btn[data-move="up"] .ic { transform: rotate(0deg); }
 .ptz-btn[data-move="right_up"] .ic { transform: rotate(45deg); }
 .ptz-btn[data-move="right"] .ic { transform: rotate(90deg); }
@@ -1598,6 +1623,7 @@ body.wall .wall-exit { display: grid; }
     background-color: rgba(7, 12, 19, 0.78);
   }
   .ptz-btn { border-radius: 12px; }
+  body.ptz-on .toast { bottom: calc(64px + var(--safe-b) + 162px); }
   .viewer-slow-card { padding: 20px 16px 16px; }
   .viewer-slow-actions button { height: var(--m-touch); }
   .ptz-btn .ic { width: 17px; height: 17px; }

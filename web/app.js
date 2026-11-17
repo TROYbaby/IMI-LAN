@@ -18,7 +18,7 @@ const state = {
   devices: [],
   viewer: null,          // {name, player, recorder, microphone}
   paused: new Set(loadJSON('imi.paused', [])),   // 用户手动暂停的摄像头
-  settings: { layout: '1x1', gridLayout: '2x2', scope: 'room', display: 'fill', box: 'auto', fit: 'cover', hideBattery: true, keepAlive: true, bgSleep: true, theme: 'auto', roomLayouts: {}, ...loadJSON('imi.settings', {}) },
+  settings: { layout: '1x1', gridLayout: '2x2', scope: 'room', display: 'fill', box: 'auto', fit: 'cover', hideBattery: true, keepAlive: true, bgSleep: true, theme: 'auto', roomLayouts: {}, ptzFlip: 'none', ptzStep: 1, setTab: 'display', ...loadJSON('imi.settings', {}) },
   streamUrls: {},        // name -> 配置里的流地址（/api/streams 激活后不含 url）
   roomData: cachedRooms(), // 本地助手 /rooms 返回的米家房间与设备映射（启动时先用上次缓存）
 };
@@ -1068,6 +1068,28 @@ function updateSettings() {
   if (regionEl) regionEl.textContent = regionName(state.region);
   const setRegion = $('#setRegion');
   if (setRegion) setRegion.textContent = regionName(state.region);
+}
+
+/* 设置项涨到十几条后一屏拉不完，按「显示 / 云台 / 其他」分成三页 */
+const SET_TABS = ['display', 'ptz', 'more'];
+
+function applySettingsTab(name) {
+  const tab = SET_TABS.includes(name) ? name : 'display';
+  state.settings.setTab = tab;
+  $$('#setTabs [data-set-tab]').forEach(b => {
+    const on = b.dataset.setTab === tab;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-selected', String(on));
+  });
+  $$('[data-set-pane]').forEach(p => { p.hidden = p.dataset.setPane !== tab; });
+}
+
+// 云台两项设置：方向镜像、轻点步长。纯本地，改完立即生效。
+function syncPtzSettingsUI() {
+  const flip = state.settings.ptzFlip || 'none';
+  $$('#ptzFlipSeg [data-flip]').forEach(b => b.classList.toggle('on', b.dataset.flip === flip));
+  const step = String(Math.round(Number(state.settings.ptzStep) || 1));
+  $$('#ptzStepSeg [data-step]').forEach(b => b.classList.toggle('on', b.dataset.step === step));
 }
 
 function tickClock() {
@@ -3092,6 +3114,8 @@ function openSettings() {
   $('#setHideBattery').checked = state.settings.hideBattery !== false;
   $('#setKeepAlive').checked = state.settings.keepAlive !== false;
   $('#setBgSleep').checked = state.settings.bgSleep !== false;
+  applySettingsTab(state.settings.setTab);
+  syncPtzSettingsUI();
   $('#modalSettings').classList.add('open');
   $('#modalSettings').setAttribute('aria-hidden', 'false');
   // 打开设置就重算一次外观判定，顺带把读数刷新出来
@@ -3185,6 +3209,28 @@ function bindEvents() {
       updateLayoutUI();
       applyFitLive();
       refreshStreams();
+    });
+  });
+  $$('#setTabs [data-set-tab]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      applySettingsTab(btn.dataset.setTab);
+      saveSettings();
+    });
+  });
+  $$('#ptzFlipSeg [data-flip]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.settings.ptzFlip = btn.dataset.flip;
+      saveSettings();
+      syncPtzSettingsUI();
+      haptic(8);
+    });
+  });
+  $$('#ptzStepSeg [data-step]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.settings.ptzStep = Number(btn.dataset.step) || 1;
+      saveSettings();
+      syncPtzSettingsUI();
+      haptic(8);
     });
   });
   [['#setVersion', '引擎版本'], ['#setUser', '账号'], ['#setRegion', '区域']].forEach(([sel, label]) => {
@@ -3737,6 +3783,7 @@ const ptz = {
   repeatTimer: 0,
   holdTimer: 0,
   lastErrorAt: 0,
+  stopTimer: 0,    // 松手后延迟发停止的句柄（步长余量）
 };
 
 // 长按上限：手指滑出屏幕没收到 pointerup 时，靠它保证电机不会一直转。
@@ -3745,6 +3792,33 @@ const PTZ_HOLD_MAX = 15000;
 // 万一某个固件把它当步进，700ms 一步也不至于堆积（约 1.4s 是
 // 「命令发出 → 画面真的动」的延迟，不是步进间隔）。
 const PTZ_REPEAT_MS = 700;
+
+// 步长 = 松手后「再多走一小段」的时长。0x112 的 operation 是「持续朝
+// 该方向转」，一步走多远取决于停止命令发得多晚 —— 所以档位调的是延迟，
+// 不是连发几条（连发会被松手刹车直接掐掉，档位等于没有）。
+const PTZ_STEP_DELAY = { 1: 0, 2: 170, 3: 380 };
+
+// 吊装 / 倒装时画面是正的，方向键却是反的。按语义做镜像即可，
+// 网关和摄像机都不用改 —— 它们只认 operation 1..4。
+function ptzFlipDir(dir) {
+  const flip = state.settings.ptzFlip || 'none';
+  if (flip === 'none' || !dir) return dir;
+  let h = '';
+  let v = '';
+  String(dir).split('_').forEach((part) => {
+    if (part === 'up' || part === 'down') v = part;
+    else if (part === 'left' || part === 'right') h = part;
+  });
+  if (flip.includes('h')) h = h === 'left' ? 'right' : h === 'right' ? 'left' : h;
+  if (flip.includes('v')) v = v === 'up' ? 'down' : v === 'down' ? 'up' : v;
+  if (v && h) return h + '_' + v;
+  return v || h || dir;
+}
+
+function ptzStepMs() {
+  const n = Math.round(Number(state.settings.ptzStep) || 1);
+  return PTZ_STEP_DELAY[n] ?? 0;
+}
 
 // 让电机停下来。切画面、收起方向盘、松手都要走这里。
 function ptzSendStop(name) {
@@ -3758,6 +3832,8 @@ function ptzSendStop(name) {
 }
 
 function ptzReset() {
+  clearTimeout(ptz.stopTimer);
+  ptz.stopTimer = 0;
   const wasOn = $$('.ptz-btn.on', $('#ptzPad')).length > 0;
   if (wasOn) ptzSendStop();
   ptz.probing++;
@@ -3783,6 +3859,8 @@ function ptzRender() {
   const collapsed = supported && key && state.settings.ptzHidden === key;
   pad.hidden = !supported || collapsed;
   toggle.hidden = !supported || !collapsed;
+  // 方向盘压着底部提示条：挂个标记让 toast 抬到它上方（见 body.ptz-on）
+  document.body.classList.toggle('ptz-on', !pad.hidden);
   if (!supported) return;
   // 斜向不是所有型号都有对应取值，规格里没有的直接不显示
   $$('.ptz-btn', pad).forEach(btn => {
@@ -3791,6 +3869,20 @@ function ptzRender() {
 }
 
 const ptzWarned = new Set();   // 同一型号只提示一次，别反复弹
+
+// 规格要联网问 miot-spec.org，同一台反复进出单画面没必要重查
+const ptzSpecCache = new Map();      // key -> { at, data }
+const PTZ_SPEC_TTL = 10 * 60 * 1000;
+
+function ptzApplySpec(data) {
+  const spec = data.spec || {};
+  ptz.model = data.model || '';
+  ptz.note = spec.note || '';
+  ptz.channel = spec.channel || '';
+  // 后端已经按通道算过 supported：规格里有云台动作走云端，
+  // 没有则走视频连接里的命令通道（这批摄像机的真实路径）。
+  ptz.dirs = spec.supported && Array.isArray(spec.dirs) ? spec.dirs : [];
+}
 
 async function ptzProbe(name) {
   ptz.probing++;
@@ -3804,6 +3896,14 @@ async function ptzProbe(name) {
   if (!ptz.name) return;
 
   const seq = ptz.probing;
+  const key = ptz.did || ptz.name;
+  const hit = ptzSpecCache.get(key);
+  if (hit && Date.now() - hit.at < PTZ_SPEC_TTL) {
+    ptzApplySpec(hit.data);
+    ptzRender();
+    return;
+  }
+
   const q = new URLSearchParams({ name: ptz.name, region: state.region || 'cn' });
   if (ptz.did) q.set('did', ptz.did);
   if (state.user) q.set('id', state.user);
@@ -3812,13 +3912,8 @@ async function ptzProbe(name) {
     if (seq !== ptz.probing) return;            // 已经切到别的摄像头了
     const data = await res.json().catch(() => null);
     if (!res.ok || !data?.ok) return;
-    const spec = data.spec || {};
-    ptz.model = data.model || '';
-    ptz.note = spec.note || '';
-    ptz.channel = spec.channel || '';
-    // 后端已经按通道算过 supported：规格里有云台动作走云端，
-    // 没有则走视频连接里的命令通道（这批摄像机的真实路径）。
-    ptz.dirs = spec.supported && Array.isArray(spec.dirs) ? spec.dirs : [];
+    ptzSpecCache.set(key, { at: Date.now(), data });
+    ptzApplySpec(data);
   } catch {
   }
   if (seq === ptz.probing) ptzRender();
@@ -3826,8 +3921,9 @@ async function ptzProbe(name) {
 
 async function ptzMove(dir) {
   if (!ptz.name) return;
+  const real = ptzFlipDir(dir);        // 吊装/倒装时把方向镜像回去
   const pad = $('#ptzPad');
-  const q = new URLSearchParams({ name: ptz.name, move: dir, region: state.region || 'cn' });
+  const q = new URLSearchParams({ name: ptz.name, move: real, region: state.region || 'cn' });
   if (ptz.did) q.set('did', ptz.did);
   if (state.user) q.set('id', state.user);
   pad?.classList.add('busy');
@@ -3855,14 +3951,24 @@ function ptzBind() {
 
   // 松手要补一条停止：0x112 的 operation 1..4 在多数固件上是
   // 「持续朝该方向转」，不补停止会一路转到限位。
-  const stop = () => {
+  // immediate：15 秒兜底、切后台这种必须马上停；松手则留出步长余量
+  const stop = (immediate) => {
     const had = $$('.ptz-btn.on', pad).length > 0;
     clearTimeout(ptz.pressTimer);
     clearInterval(ptz.repeatTimer);
     clearTimeout(ptz.holdTimer);
     ptz.pressTimer = ptz.repeatTimer = ptz.holdTimer = 0;
     $$('.ptz-btn.on', pad).forEach(b => b.classList.remove('on'));
-    if (had) ptzSendStop();
+    if (!had) return;
+    clearTimeout(ptz.stopTimer);
+    ptz.stopTimer = 0;
+    const delay = immediate ? 0 : ptzStepMs();
+    if (delay <= 0) {
+      ptzSendStop();
+    } else {
+      // 松手到真正停之间就是「一步」的长度，档位越大这一段越长
+      ptz.stopTimer = setTimeout(() => { ptz.stopTimer = 0; ptzSendStop(); }, delay);
+    }
   };
 
   pad.addEventListener('pointerdown', e => {
@@ -3875,6 +3981,8 @@ function ptzBind() {
 
     // 手指从一个方向滑到另一个：先把上一个停掉，否则两个方向会叠在一起
     $$('.ptz-btn.on', pad).forEach(b => { if (b !== btn) b.classList.remove('on'); });
+    clearTimeout(ptz.stopTimer);      // 上一次松手还没落地的停止命令作废
+    ptz.stopTimer = 0;
     clearTimeout(ptz.pressTimer);
     clearInterval(ptz.repeatTimer);
     clearTimeout(ptz.holdTimer);
@@ -3891,11 +3999,13 @@ function ptzBind() {
     }, PTZ_REPEAT_MS);
 
     // 兜底：手指滑出屏幕时可能收不到 pointerup，别让电机一直转
-    ptz.holdTimer = setTimeout(stop, PTZ_HOLD_MAX);
+    ptz.holdTimer = setTimeout(() => stop(true), PTZ_HOLD_MAX);
   });
   ['pointerup', 'pointercancel', 'pointerleave', 'lostpointercapture']
-    .forEach(ev => pad.addEventListener(ev, stop));
+    .forEach(ev => pad.addEventListener(ev, () => stop(false)));
   pad.addEventListener('contextmenu', e => e.preventDefault());
+  // 切后台 / 锁屏时收不到 pointerup：不补这一条，电机会一直转到限位
+  document.addEventListener('visibilitychange', () => { if (document.hidden) stop(true); });
 
   toggle?.addEventListener('click', () => {
     state.settings.ptzHidden = '';
