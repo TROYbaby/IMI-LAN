@@ -211,6 +211,54 @@ function displayCameraName(name) {
   return state.meta[name]?.name || name;
 }
 
+// 米家里改过昵称后，把本地助手 /rooms 返回的云端 name 按 did 合并进 meta。
+// 以前昵称只在「添加摄像头」时写入 localStorage，之后再也不更新，
+// 所以米家改名 / 刷新页面都看不到变化。这里以云端为准同步过来。
+function applyRoomNames() {
+  const devices = state.roomData?.devices;
+  if (!Array.isArray(devices)) return;
+  const byDid = new Map();
+  for (const d of devices) {
+    const did = String(d?.did || '');
+    if (did && d.name) byDid.set(did, String(d.name));
+  }
+  if (!byDid.size) return;
+  let changed = false;
+  for (const name of Object.keys(state.meta)) {
+    const cloudName = byDid.get(String(streamDid(name)));
+    if (cloudName && state.meta[name].name !== cloudName) {
+      state.meta[name].name = cloudName;
+      changed = true;
+    }
+  }
+  if (changed) {
+    saveMeta();
+    refreshCameraNames();
+  }
+}
+
+// 名称写入 meta 后，刷新界面上所有显示摄像头名称 / 房间名的地方
+function refreshCameraNames() {
+  for (const [name, card] of state.cards) {
+    const title = displayCameraName(name);
+    const hero = $('[data-role="heroName"]', card.el);
+    if (hero) { hero.textContent = title; hero.title = title; }
+    const room = $('.card-title b', card.el);
+    if (room) room.textContent = roomLabel(name);
+  }
+  if (state.viewer && $('#viewerName')) {
+    $('#viewerName').textContent = displayCameraName(state.viewer.name);
+  }
+  const single = $('#singleSelect');
+  if (single) {
+    for (const opt of single.options) {
+      const title = displayCameraName(opt.value);
+      if (opt.textContent !== title) opt.textContent = title;
+    }
+  }
+  renderViewerChips();
+}
+
 function cameraOnline(name) {
   const device = roomDevice(name);
   if (device) return !!device.online;
@@ -764,11 +812,13 @@ function tickClock() {
   if (viewer) viewer.textContent = text;
 }
 
-async function syncRooms() {
+async function syncRooms(force = false) {
   if (state.pageHidden || !state.user) return;
   try {
     const params = new URLSearchParams({ region: state.region });
     params.set('id', state.user);
+    // 手动刷新时带上 force，让助手跳过 10 分钟房间缓存，重读米家的最新昵称
+    if (force) params.set('force', '1');
     const res = await fetch(QR_ORIGIN + '/rooms?' + params.toString(), {
       cache: 'no-store',
       // 助手冷启动时要做一次云端登录，超时必须比服务端的 20s 宽松
@@ -781,12 +831,9 @@ async function syncRooms() {
     state.roomData = data;
     localStorage.setItem('imi.rooms', JSON.stringify(data));
     roomSyncFailed = false;
-    for (const [name, card] of state.cards) {
-      const room = $('.card-title b', card.el);
-      if (room) room.textContent = roomLabel(name);
-      const hero = $('[data-role="heroName"]', card.el);
-      if (hero) hero.textContent = displayCameraName(name);
-    }
+    // 以米家云端为准更新昵称（改名后这里才会真正变化），再统一刷新界面
+    applyRoomNames();
+    refreshCameraNames();
     renderRooms();
     updateOnlineStatus();
   } catch (e) {
@@ -2598,8 +2645,8 @@ function bindEvents() {
     await checkEngine();
     await refreshStreams();
     for (const card of state.cards.values()) card.reload();
-    syncRooms();
-    toast('画面已刷新，房间信息更新中…');
+    syncRooms(true);
+    toast('画面已刷新，正在从米家同步最新名称/房间…');
   });
 
   $('#btnMuteAll').addEventListener('click', () => {
@@ -3091,11 +3138,14 @@ async function init() {
 
   await checkEngine();
   await restoreUser();
-  // 房间信息按需刷新：没有缓存时先在引擎登录前拉一次，之后只在手动刷新时更新，
-  // 避免助手反复登录把引擎正在用的 token 挤掉。
+  // 房间信息：有缓存时先渲染，再后台静默同步一次米家最新昵称/房间；
+  // 没有缓存时先等同步完。助手侧有 10 分钟缓存，不会每次都登录云端，
+  // 所以即使是普通刷新页面，米家里改过的名字也会在后台同步过来。
   if (!state.roomData) {
     toast('正在读取房间信息…');
     try { await syncRooms(); } catch {}
+  } else {
+    syncRooms().catch(() => {});
   }
   await refreshStreams();
 

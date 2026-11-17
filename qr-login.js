@@ -627,8 +627,10 @@ function getAuth(user, token, force = false) {
   });
 }
 
-function fetchRooms(user, region) {
-  return once(`rooms:${user}|${region}`, () => loadRooms(user, region));
+function fetchRooms(user, region, force = false) {
+  // force 用不同的 key，避免与一次「非强制」的请求共用同一个 in-flight Promise
+  const key = `rooms:${user}|${region}${force ? '|force' : ''}`;
+  return once(key, () => loadRooms(user, region, force));
 }
 
 // 小米会在登录时轮换 passToken。go2rtc 只在内存里用新 token，
@@ -682,12 +684,15 @@ function persistRefreshedToken(user, configToken, auth, authToken) {
   }
 }
 
-async function loadRooms(user, region) {
+async function loadRooms(user, region, force = false) {
   const key = `${user}|${region}`;
-  if (roomsCache.data && roomsCache.key === key && Date.now() - roomsCache.at < ROOMS_TTL) {
+  // force：用户手动刷新时跳过房间缓存，重读米家的设备名 / 房间名。
+  // 有完整凭据时 getAuth 直接用 serviceToken 构造会话、不会再次云端登录，
+  // 因此这里强制刷新不会额外消耗风控额度。
+  if (!force && roomsCache.data && roomsCache.key === key && Date.now() - roomsCache.at < ROOMS_TTL) {
     return roomsCache.data;
   }
-  if (roomsFail.key === key && Date.now() - roomsFail.at < ROOMS_FAIL_BACKOFF) {
+  if (!force && roomsFail.key === key && Date.now() - roomsFail.at < ROOMS_FAIL_BACKOFF) {
     throw new Error(roomsFail.message);
   }
 
@@ -763,7 +768,8 @@ async function loadRooms(user, region) {
     const data = {
       ok: true,
       rooms,
-      devices: devices.map(({ did, room, online }) => ({ did, room, online })),
+      // 带上 name：米家里改过的摄像头昵称靠它同步到前端（前端按 did 匹配后更新卡片标题）
+      devices: devices.map(({ did, name, room, online }) => ({ did, name, room, online })),
       total: {
         online: devices.filter(d => d.online).length,
         total: devices.length,
@@ -1090,7 +1096,8 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       try {
-        const data = await fetchRooms(user, region);
+        const force = url.searchParams.get('force') === '1';
+        const data = await fetchRooms(user, region, force);
         sendJSON(req, res, 200, data);
       } catch (e) {
         log(`rooms failed for ${mask(user)}: ${e.message}`);

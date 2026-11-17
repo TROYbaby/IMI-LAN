@@ -9,7 +9,7 @@
   "scripts": {
     "start": "electron .",
     "probe": "electron . --probe",
-    "pack:portable": "electron-packager . IMI-LAN --platform=win32 --arch=x64 --out=dist --overwrite --icon=assets/icon.ico --asar --ignore=node_modules --ignore=dist --ignore=probe.json --ignore=probe.png --ignore=engine.log",
+    "pack:portable": "electron-packager . IMI-LAN --platform=win32 --arch=x64 --out=dist --overwrite --icon=assets/icon.ico --asar --ignore=node_modules --ignore=dist --ignore=vendor --ignore=probe.json --ignore=probe.png --ignore=engine.log",
     "pack:win": "electron-builder --win nsis",
     "pack:mac": "electron-builder --mac"
   },
