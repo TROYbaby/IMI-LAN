@@ -52,7 +52,7 @@ try {
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
 } catch {}
 </script>
-<link rel="stylesheet" href="style.css?v=20261117a">
+<link rel="stylesheet" href="style.css?v=20261117b">
 </head>
 <body>
 
@@ -263,6 +263,8 @@ try {
 <!-- 单路全屏查看 -->
 <div class="modal viewer" id="modalViewer" aria-hidden="true">
   <div class="viewer-stage" id="viewerStage"></div>
+  <!-- 首帧到达前的上一帧占位：铺在视频之上，出画后淡出 -->
+  <div class="viewer-still" id="viewerStill" aria-hidden="true"></div>
 
   <div class="viewer-top">
     <div class="viewer-title">
@@ -303,6 +305,18 @@ try {
   <button class="ptz-toggle" id="ptzToggle" hidden aria-label="显示云台方向键">
     <svg class="ic"><use href="#i-camera"/></svg><span>云台</span>
   </button>
+
+  <!-- 首帧跑不出来时给具体建议，而不是让用户对着黑屏等 -->
+  <div class="viewer-slow" id="viewerSlow" hidden>
+    <div class="viewer-slow-card">
+      <b>还没收到画面</b>
+      <p id="viewerSlowText">正在建立连接…</p>
+      <div class="viewer-slow-actions">
+        <button type="button" data-slow="hd">改用高清</button>
+        <button type="button" data-slow="retry">重试</button>
+      </div>
+    </div>
+  </div>
 
   <div class="viewer-bottom">
     <span class="viewer-hint">← → 切换 · 数字键直达 · Esc 退出</span>
@@ -487,6 +501,6 @@ try {
 </button>
 
 <script type="module" src="video-stream.js?v=20261114f"></script>
-<script type="module" src="app.js?v=20261117a"></script>
+<script type="module" src="app.js?v=20261117b"></script>
 </body>
 </html>

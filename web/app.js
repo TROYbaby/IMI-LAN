@@ -79,6 +79,35 @@ function cachedRooms() {
   return data && Array.isArray(data.devices) ? data : null;
 }
 
+/* 每个摄像头最近一帧：切画面、重连、换画质时先铺这张图，别直接黑屏。
+   只放内存不落盘（一帧 480 长边约 25KB），最多留 12 台。 */
+const stills = new Map();
+const STILL_MAX = 12;
+
+function rememberStill(name, video) {
+  if (!name || !video) return;
+  const w = video.videoWidth;
+  const h = video.videoHeight;
+  if (!w || !h) return;
+  try {
+    const scale = Math.min(1, 480 / Math.max(w, h));
+    const cv = document.createElement('canvas');
+    cv.width = Math.max(1, Math.round(w * scale));
+    cv.height = Math.max(1, Math.round(h * scale));
+    cv.getContext('2d').drawImage(video, 0, 0, cv.width, cv.height);
+    const url = cv.toDataURL('image/jpeg', 0.7);
+    stills.delete(name);
+    stills.set(name, url);
+    while (stills.size > STILL_MAX) stills.delete(stills.keys().next().value);
+  } catch {
+    // 跨域流会把 canvas 标成 tainted，取不到就算了，不影响播放
+  }
+}
+
+function stillOf(name) {
+  return (name && stills.get(name)) || '';
+}
+
 function saveMeta() {
   localStorage.setItem('imi.meta', JSON.stringify(state.meta));
 }
@@ -1261,6 +1290,7 @@ function createCard(name, delay = 0) {
       <span class="badge" data-role="badge">连接中</span>
     </div>
     <div class="card-media">
+      <div class="card-still" data-role="still" aria-hidden="true"></div>
       <div class="card-mask" data-role="mask">
         <div><div class="spinner"></div>正在建立局域网连接…</div>
       </div>
@@ -1298,6 +1328,7 @@ function createCard(name, delay = 0) {
     onChange: on => $('[data-act="zoom"]', card)?.classList.toggle('on', on),
   });
   const mask = $('[data-role="mask"]', card);
+  const still = $('[data-role="still"]', card);
   const badge = $('[data-role="badge"]', card);
   const signal = $('[data-role="signal"]', card);
   const heroSignal = $('[data-role="heroSignal"]', card);
@@ -1314,6 +1345,8 @@ function createCard(name, delay = 0) {
   let bgPaused = false;     // 后台休眠，回到前台自动恢复
   let startedAt = 0;
   let lastLiveAt = 0;
+  let lastStillAt = 0;      // 上次抓帧时间，用来定期刷新占位图
+  let slowHinted = false;   // 12 秒没出画时已经换过提示文案
   let phase = 'idle';
   let lastError = '';
 
@@ -1342,7 +1375,25 @@ function createCard(name, delay = 0) {
   }
 
   function spinnerMask() {
-    mask.innerHTML = '<div><div class="spinner"></div>正在建立局域网连接…</div>';
+    mask.innerHTML = '<div><div class="spinner"></div><span data-role="maskText">正在建立局域网连接…</span></div>';
+  }
+
+  // 占位图：切回来/重连时先看到上一帧，而不是一块黑
+  function showCardStill() {
+    const url = stillOf(name);
+    if (!url) {
+      still.classList.remove('on');
+      return;
+    }
+    if (still.dataset.url !== url) {
+      still.dataset.url = url;
+      still.style.backgroundImage = `url("${url}")`;
+    }
+    still.classList.add('on');
+  }
+
+  function hideCardStill() {
+    still.classList.remove('on');
   }
 
   function errorMask(title, detail, withLogin = false) {
@@ -1396,9 +1447,11 @@ function createCard(name, delay = 0) {
     startedAt = Date.now();
     lastLiveAt = 0;
     lastError = '';
+    slowHinted = false;
     setBadge('connecting');
     mask.classList.remove('hide');
     spinnerMask();
+    showCardStill();
     setSignal(0, '正在连接…');
 
     player = makePlayer(name, {
@@ -1416,6 +1469,9 @@ function createCard(name, delay = 0) {
         errorTimer = 0;
         setBadge('live');
         mask.classList.add('hide');
+        rememberStill(name, player.video);
+        lastStillAt = Date.now();
+        hideCardStill();
         if (state.viewer) {
           try { player?.video?.pause(); } catch {}
         }
@@ -1453,15 +1509,26 @@ function createCard(name, delay = 0) {
     timer = setInterval(() => {
       if (!player || suspended || state.pageHidden) return;
       const v = player.video;
+      const waited = Date.now() - (lastLiveAt || startedAt);
       if (v && v.readyState >= 2 && v.videoWidth > 0) {
         lastLiveAt = Date.now();
         setBadge('live');
         mask.classList.add('hide');
-      } else if (phase !== 'timeout' && Date.now() - (lastLiveAt || startedAt) > 30000) {
+        hideCardStill();
+        if (Date.now() - lastStillAt > 30000) {
+          lastStillAt = Date.now();
+          rememberStill(name, v);
+        }
+      } else if (phase !== 'timeout' && waited > 30000) {
         setBadge('timeout');
         mask.classList.remove('hide');
         lastError = lastError || '摄像头可能休眠或离线';
         scheduleRetry('连接超时');
+      } else if (waited > 12000 && !slowHinted) {
+        // 12 秒还没出画：先给个「还在等」的具体说法，别让用户以为卡死
+        slowHinted = true;
+        const tip = mask.querySelector('[data-role="maskText"]');
+        if (tip) tip.textContent = '连接较慢，正在重试…';
       }
     }, 1000);
   }
@@ -1854,6 +1921,7 @@ function openViewer(name) {
   const stage = $('#viewerStage');
   stage._zoom?.destroy();
   stage.innerHTML = '';
+  showViewerStill(name);
 
   const cardVideo = state.cards.get(name)?.player?.video;
   const initialMuted = cardVideo ? cardVideo.muted : state.muted;
@@ -1865,7 +1933,12 @@ function openViewer(name) {
       contain: state.settings.display === 'ratio',
       muted: initialMuted,
       microphone: false,
-      onReady: () => setViewerState(true),
+      onReady: () => {
+        rememberStill(name, player.video);
+        hideViewerStill(name);
+        clearViewerWatch();
+        setViewerState(true);
+      },
       onError: () => setViewerState(false),
       onStatus: () => setViewerState(false),
     });
@@ -1884,6 +1957,7 @@ function openViewer(name) {
     muted: initialMuted,
   };
   state.viewer = viewer;
+  startViewerWatch(name);
   holdCardsForViewer();
   stage.appendChild(player.el);
   viewer.zoom = createZoom(stage, {
@@ -1898,6 +1972,7 @@ function openViewer(name) {
   $('#viewerSub').textContent = [meta.ip, live ? 'RTC' : '等待重连'].filter(Boolean).join(' · ');
   $('#btnViewerMute').innerHTML = icon(initialMuted ? 'i-muted' : 'i-volume');
   $('#btnViewerMute').classList.toggle('on', !initialMuted);
+  renderQualityButton(name);
 
   renderViewerChips();
   tickClock();
@@ -1947,7 +2022,77 @@ function closeViewer() {
 
   releaseCardsForViewer();
   setRecUI(false);
+  clearViewerWatch();
   ptzReset();
+}
+
+/* ---------------------------------------------------------------- */
+/* 单画面：上一帧占位 + 首帧看门狗                                   */
+/* ---------------------------------------------------------------- */
+
+let viewerStillLast = '';   // 上一台看过的画面，目标没有存帧时兜底
+let viewerWatch = 0;
+
+function showViewerStill(name) {
+  const el = $('#viewerStill');
+  if (!el) return;
+  const url = stillOf(name) || viewerStillLast;
+  if (!url) {
+    el.classList.remove('on');
+    return;
+  }
+  if (el.dataset.url !== url) {
+    el.dataset.url = url;
+    el.style.backgroundImage = `url("${url}")`;
+  }
+  el.classList.add('on');
+}
+
+function hideViewerStill(name) {
+  const el = $('#viewerStill');
+  const url = stillOf(name);
+  if (url) viewerStillLast = url;
+  el?.classList.remove('on');
+}
+
+function clearViewerWatch() {
+  clearTimeout(viewerWatch);
+  viewerWatch = 0;
+  $('#viewerSlow')?.setAttribute('hidden', '');
+}
+
+// 12 秒还不出画就把「连接中」换成可操作的建议；
+// 无子码流的机型（比如母婴看护版）常见症状就是黑屏且没有兜底。
+function startViewerWatch(name) {
+  clearViewerWatch();
+  const startedAt = Date.now();
+  const tick = () => {
+    if (!state.viewer || state.viewer.name !== name) return;
+    const v = state.viewer.player?.video;
+    if (v && v.readyState >= 2 && v.videoWidth > 0) {
+      clearViewerWatch();
+      return;
+    }
+    const el = $('#viewerSlow');
+    const txt = $('#viewerSlowText');
+    if (!el || !txt) return;
+    const secs = Math.round((Date.now() - startedAt) / 1000);
+    const sd = state.meta[name]?.quality === 'sd';
+    // 已经是高清时说「换成高清」会自相矛盾，所以两种档位分开措辞
+    txt.textContent = secs >= 25
+      ? (sd
+        ? `已经等了 ${secs} 秒，当前走「流畅」。先试「改用高清」，还不行就回卡片看它是不是休眠或离线。`
+        : `已经等了 ${secs} 秒，当前已是「高清」。这台可能休眠或离线，也可能这一路暂时取不到视频。`)
+      : (sd
+        ? `已经等了 ${secs} 秒，当前走「流畅」。这台如果没有子码流，换成高清往往就能出画面。`
+        : `已经等了 ${secs} 秒，当前已是「高清」。无子码流的机型会慢一些，再等等或点重试。`);
+    // 已是高清时，那颗按钮点了也没意义，直接收起来只留「重试」
+    const hdBtn = el.querySelector('[data-slow="hd"]');
+    if (hdBtn) hdBtn.hidden = !sd;
+    el.removeAttribute('hidden');
+    viewerWatch = setTimeout(tick, 1000);
+  };
+  viewerWatch = setTimeout(tick, 12000);
 }
 
 // 单画面里单击画面：隐藏/显示顶部和底部控件（右上角菜单一起收起）
@@ -1968,16 +2113,27 @@ function recreateViewerPlayer({ microphone } = {}) {
   viewer.player.destroy();
   viewer.zoom?.destroy();
   viewer.zoom = null;
-  const player = makePlayer(viewer.name, {
+  const name = viewer.name;
+  const player = makePlayer(name, {
     contain: state.settings.display === 'ratio',
     muted: wasMuted,
     microphone: microphone ?? viewer.microphone,
+    onReady: () => {
+      rememberStill(name, player.video);
+      hideViewerStill(name);
+      clearViewerWatch();
+      setViewerState(true);
+    },
+    onError: () => setViewerState(false),
+    onStatus: () => setViewerState(false),
   });
   viewer.player = player;
   viewer.microphone = microphone ?? viewer.microphone;
   viewer.muted = wasMuted;
   $('#viewerStage').innerHTML = '';
   $('#viewerStage').appendChild(player.el);
+  showViewerStill(name);
+  startViewerWatch(name);
   viewer.zoom = createZoom($('#viewerStage'), {
     onChange: on => $('#btnViewerZoom')?.classList.toggle('on', on),
   });
@@ -2655,6 +2811,17 @@ function updateCardQuality(name) {
   $$('[data-quality-label]', card.el).forEach(el => { el.textContent = label; });
 }
 
+// 单画面右上角那颗按钮直接显示当前画质（高清/流畅），点一下切到另一档。
+// 原来是一个写着「画质」的弹层入口：弱网时看不出自己在哪一档，还要多点一次。
+function renderQualityButton(name = state.viewer?.name) {
+  const btn = $('#btnViewerQuality');
+  if (!btn) return;
+  const sd = !!name && state.meta[name]?.quality === 'sd';
+  btn.textContent = sd ? '流畅' : '高清';
+  btn.classList.toggle('on', sd);
+  btn.title = sd ? '当前「流畅」，点击切到高清' : '当前「高清」，点击切到流畅';
+}
+
 async function applyQuality(name, q, silent = false) {
   const info = streamInfo(name);
   const meta = state.meta[name] || (state.meta[name] = {
@@ -2694,6 +2861,7 @@ async function applyQuality(name, q, silent = false) {
     state.cards.get(name)?.reload();
     if (viewer) recreateViewerPlayer();
     updateCardQuality(name);
+    renderQualityButton(name);
     if (!silent) toast(q === 'sd' ? '已切换到流畅画质，正在重连' : '已切换到高清画质，正在重连');
     return true;
   } catch (e) {
@@ -3098,11 +3266,28 @@ function bindEvents() {
 
   $('#btnViewerQuality').addEventListener('click', ev => {
     ev.stopPropagation();
-    $('#qualityMenu').classList.toggle('open');
+    const name = state.viewer?.name;
+    if (!name) return;
+    const cur = state.meta[name]?.quality === 'sd' ? 'sd' : 'hd';
+    changeQuality(cur === 'sd' ? 'hd' : 'sd');
   });
   $$('#qualityMenu button').forEach(btn => {
     btn.addEventListener('click', () => changeQuality(btn.dataset.q));
   });
+  $('#viewerSlow')?.addEventListener('click', ev => {
+    const act = ev.target.closest('[data-slow]')?.dataset.slow;
+    const name = state.viewer?.name;
+    if (!act || !name) return;
+    clearViewerWatch();
+    if (act === 'hd') {
+      changeQuality('hd');
+    } else if (act === 'retry') {
+      recreateViewerPlayer();
+      showViewerStill(name);
+      startViewerWatch(name);
+    }
+  });
+
   document.addEventListener('click', ev => {
     if (!ev.target.closest('.layout-wrap')) closeLayoutMenu();
     if (!ev.target.closest('.card-menu-btn') && !ev.target.closest('.card-tools')) {
@@ -3380,6 +3565,8 @@ function ptzRender() {
   });
 }
 
+const ptzWarned = new Set();   // 同一型号只提示一次，别反复弹
+
 async function ptzProbe(name) {
   ptz.probing++;
   ptz.did = name ? streamDid(name) : '';
@@ -3397,9 +3584,16 @@ async function ptzProbe(name) {
     if (seq !== ptz.probing) return;            // 已经切到别的摄像头了
     const data = await res.json().catch(() => null);
     if (!res.ok || !data?.ok) return;
+    const spec = data.spec || {};
     ptz.model = data.model || '';
-    ptz.note = data.spec?.note || '';
-    ptz.dirs = Array.isArray(data.spec?.dirs) ? data.spec.dirs : [];
+    ptz.note = spec.note || '';
+    // 只有网关在公开规格里真的解析到云台动作才算支持；
+    // 只认得「这台是云台机」但没有可用动作时，不亮方向盘（否则每次都失败）。
+    ptz.dirs = spec.supported && Array.isArray(spec.dirs) ? spec.dirs : [];
+    if (!ptz.dirs.length && spec.ptzCapable && !ptzWarned.has(ptz.model)) {
+      ptzWarned.add(ptz.model);
+      toast('这台是云台机，但当前播放引擎不支持云台命令，方向盘先隐藏了', true);
+    }
   } catch {
   }
   if (seq === ptz.probing) ptzRender();

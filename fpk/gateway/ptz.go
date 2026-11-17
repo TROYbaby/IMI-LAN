@@ -52,14 +52,50 @@ type ptzSpec struct {
 	Note    string         `json:"note,omitempty"`
 	Dirs    []string       `json:"dirs"`
 	DirVals map[string]any `json:"-"`
+	// Supported 只有从公开规格里真解析出云台动作才为 true。
+	// 前端据此决定要不要显示方向盘 —— 盲调云端只会让用户以为坏了。
+	Supported bool `json:"supported"`
+	// PTZCapable 表示该型号本身是云台机（规格里有 ptz 相关属性），
+	// 但当前引擎没有可用的控制通道。
+	PTZCapable bool `json:"ptzCapable"`
 }
 
 type miotParam struct {
+	// 属性用 IID 编号，动作入参用 Piid；in 里写数字时指的是同服务下属性的 IID。
+	IID       int    `json:"iid"`
 	Piid      int    `json:"piid"`
 	Type      string `json:"type"`
 	Desc      string `json:"description"`
 	Format    string `json:"format"`
 	ValueList []any  `json:"value-list"`
+}
+
+// 规格里 in 有两种写法：[{"piid":1,"value-list":[...]}] 和 [1]。
+// 后者只给编号，取值要从同服务的同名属性上找。按对象硬解会让整个规格解析失败
+// （这正是之前「云台怎么都不动」的真正原因：解析失败 → 全部退化成 fallback）。
+func (m *miotParam) UnmarshalJSON(b []byte) error {
+	var n int
+	if err := json.Unmarshal(b, &n); err == nil {
+		*m = miotParam{Piid: n}
+		return nil
+	}
+	type raw miotParam
+	var r raw
+	if err := json.Unmarshal(b, &r); err != nil {
+		return err
+	}
+	*m = miotParam(r)
+	return nil
+}
+
+// propValues 按 piid 去同服务里找属性的取值表（in 只给编号时用）。
+func propValues(svc miotService, piid int) ([]any, string) {
+	for _, p := range svc.Properties {
+		if p.IID == piid {
+			return p.ValueList, p.Format
+		}
+	}
+	return nil, ""
 }
 
 type miotAction struct {
@@ -70,10 +106,11 @@ type miotAction struct {
 }
 
 type miotService struct {
-	IID     int          `json:"iid"`
-	Type    string       `json:"type"`
-	Desc    string       `json:"description"`
-	Actions []miotAction `json:"actions"`
+	IID        int          `json:"iid"`
+	Type       string       `json:"type"`
+	Desc       string       `json:"description"`
+	Actions    []miotAction `json:"actions"`
+	Properties []miotParam  `json:"properties"`
 }
 
 type miotInstanceDetail struct {
@@ -88,25 +125,54 @@ var (
 	miotIndexAt  time.Time
 )
 
-func httpJSON(rawurl string, out any) error {
+func httpBytes(rawurl string) ([]byte, error) {
 	req, err := http.NewRequest("GET", rawurl, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("User-Agent", "imi-lan-gateway/1.0 (+ptz)")
 	res, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d", res.StatusCode)
+		return nil, fmt.Errorf("HTTP %d", res.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(res.Body, 16<<20))
+	return io.ReadAll(io.LimitReader(res.Body, 16<<20))
+}
+
+func httpJSON(rawurl string, out any) error {
+	body, err := httpBytes(rawurl)
 	if err != nil {
 		return err
 	}
 	return json.Unmarshal(body, out)
+}
+
+// parseModelIndex 解析型号 -> 规格 urn 的映射。
+// 接口返回的是 {"instances":[...]}，不是裸数组；之前按数组解析会静默失败，
+// 于是所有型号都掉进 fallback，云台方向永远对不上。
+func parseModelIndex(body []byte) (map[string]string, error) {
+	var payload struct {
+		Instances []struct {
+			Type  string `json:"type"`
+			Model string `json:"model"`
+		} `json:"instances"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+	if len(payload.Instances) == 0 {
+		return nil, errors.New("规格列表为空：接口结构可能又变了")
+	}
+	idx := make(map[string]string, len(payload.Instances))
+	for _, it := range payload.Instances {
+		if it.Model != "" && it.Type != "" {
+			idx[strings.ToLower(it.Model)] = it.Type
+		}
+	}
+	return idx, nil
 }
 
 // modelIndex 拉一次全量型号表，cache 一天。表大约 1.5MB，只在本机内存里留映射。
@@ -119,18 +185,13 @@ func modelIndex() (map[string]string, error) {
 	}
 	ptzMu.Unlock()
 
-	var list []struct {
-		Type  string `json:"type"`
-		Model string `json:"model"`
-	}
-	if err := httpJSON(miotSpecListURL, &list); err != nil {
+	body, err := httpBytes(miotSpecListURL)
+	if err != nil {
 		return nil, err
 	}
-	idx := make(map[string]string, len(list))
-	for _, it := range list {
-		if it.Model != "" && it.Type != "" {
-			idx[strings.ToLower(it.Model)] = it.Type
-		}
+	idx, err := parseModelIndex(body)
+	if err != nil {
+		return nil, err
 	}
 	ptzMu.Lock()
 	miotIndex, miotIndexAt = idx, time.Now()
@@ -225,16 +286,35 @@ func resolvePtzSpec(model string) *ptzSpec {
 			if urn, ok := idx[key]; ok {
 				var detail miotInstanceDetail
 				if err := httpJSON(miotSpecTypeURL+url.QueryEscape(urn), &detail); err == nil {
+					// 先看这台是不是云台机：规格里有 ptz-camera / ptz 系列属性
+					for _, svc := range detail.Services {
+						for _, p := range svc.Properties {
+							t := strings.ToLower(p.Type + " " + p.Desc)
+							if strings.Contains(t, "ptz") {
+								spec.PTZCapable = true
+							}
+						}
+					}
+					foundAction := false
 					for _, svc := range detail.Services {
 						act, score := pickPtzAction(svc)
 						if score < 0 {
 							continue
 						}
+						foundAction = true
 						p := act.In[0]
+						// in 只给编号时，取值表挂在同服务的属性上
+						choices := p.ValueList
+						format := p.Format
+						if len(choices) == 0 && p.Piid > 0 {
+							if pv, pf := propValues(svc, p.Piid); len(pv) > 0 {
+								choices, format = pv, pf
+							}
+						}
 						dirs := []string{}
 						vals := map[string]any{}
 						for _, d := range ptzDirOrder {
-							if v, ok := matchValue(p.ValueList, d); ok {
+							if v, ok := matchValue(choices, d); ok {
 								dirs = append(dirs, d)
 								vals[d] = v
 							}
@@ -244,16 +324,30 @@ func resolvePtzSpec(model string) *ptzSpec {
 							continue
 						}
 						spec.Siid, spec.Aiid, spec.Piid = svc.IID, act.IID, p.Piid
-						spec.Format = p.Format
+						spec.Format = format
 						spec.Action = act.Desc
 						spec.Source = "spec"
 						spec.Note = ""
 						spec.Dirs, spec.DirVals = dirs, vals
+						spec.Supported = true
 						break
+					}
+					if !foundAction {
+						// 这批摄像机（C700 / xiaovv / 叮零）就是这种情况：
+						// 云台机，但转动命令走 P2P 视频连接里的 cmd 通道。
+						spec.Note = "该型号的公开规格里没有云台动作，转动命令走 P2P 通道"
 					}
 				}
 			}
 		}
+	}
+
+	// 没解析出可用动作时不要保留 fallback 的方向表：
+	// 否则接口会同时说「不支持」又给出一堆方向，前端和调试都容易误判。
+	if !spec.Supported {
+		spec.Dirs, spec.DirVals = nil, nil
+		spec.Source = "unsupported"
+		spec.Action = ""
 	}
 
 	ptzMu.Lock()
@@ -361,6 +455,22 @@ func (s *qrService) registerPTZ(mux *http.ServeMux) {
 			return
 		}
 		spec := resolvePtzSpec(model)
+
+		// 公开规格里没有云台动作时，云端 /miotspec/action 一定失败（这批摄像机
+		// 的转动走的是 P2P 视频连接里的 cmd 通道，官方 go2rtc 不开放）。
+		// 与其返回一个看不懂的云端错误，不如直接说明原因。
+		// 显式带 siid/aiid/value 时仍然放行，方便换型号手动试。
+		if !spec.Supported && q.Get("siid") == "" && q.Get("value") == "" {
+			reason := "该型号的公开 MIoT 规格没有云台动作，云端控制通道不可用"
+			if spec.PTZCapable {
+				reason = "这台是云台机，但转动命令走 P2P 通道，当前播放引擎（go2rtc）不开放该通道"
+			}
+			s.sendJSON(w, r, 501, map[string]any{
+				"ok": false, "error": reason, "model": model,
+				"ptzCapable": spec.PTZCapable, "supported": false, "note": spec.Note,
+			})
+			return
+		}
 
 		// 允许显式覆盖，方便换型号时不用改代码就能试。
 		siid, aiid, piid := spec.Siid, spec.Aiid, spec.Piid

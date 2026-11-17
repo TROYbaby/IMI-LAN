@@ -1360,6 +1360,85 @@ body.wall .wall-exit { display: grid; }
 .shell { overflow: hidden; }
 .stage, .stage-body { min-width: 0; }
 
+/* ---------- 首帧前的上一帧占位 ---------- */
+/* 卡片：铺在视频之上、遮罩之下。模糊 + 压暗，明确是「旧画面」而不是实时 */
+.card-still {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background-size: cover;
+  background-position: center;
+  filter: blur(14px) saturate(1.05) brightness(0.66);
+  transform: scale(1.08);      /* 模糊后边缘会透出底色，放大一点盖住 */
+  opacity: 0;
+  transition: opacity 0.26s ease;
+  pointer-events: none;
+}
+.card-still.on { opacity: 1; }
+
+/* 单画面：盖在 video 上（video 自带不透明底色），出画后淡出 */
+.viewer-still {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  background-size: cover;
+  background-position: center;
+  filter: blur(18px) brightness(0.55);
+  transform: scale(1.08);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+}
+.viewer-still.on { opacity: 1; }
+
+/* ---------- 首帧超时提示 ---------- */
+.viewer-slow {
+  position: absolute;
+  /* 顶栏以下才开始，否则会盖住关闭按钮，用户想退都退不出去 */
+  inset: calc(58px + env(safe-area-inset-top, 0px)) 0 0 0;
+  z-index: 9;
+  pointer-events: none;      /* 只让卡片本身可点，别吃掉顶栏和底栏的手势 */
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(3, 7, 12, 0.55);
+}
+.viewer-slow[hidden] { display: none; }
+.viewer-slow-card {
+  width: min(340px, 100%);
+  pointer-events: auto;
+  padding: 18px 18px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 16px;
+  background: rgba(10, 16, 24, 0.92);
+  color: #e8eef7;
+  text-align: center;
+}
+.viewer-slow-card b { display: block; font-size: 14px; font-weight: 600; }
+.viewer-slow-card p {
+  margin: 8px 0 14px;
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 11.5px;
+  line-height: 1.65;
+}
+.viewer-slow-actions { display: flex; gap: 8px; }
+.viewer-slow-actions button {
+  flex: 1;
+  height: 40px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #e8eef7;
+  font-size: 12.5px;
+  font-weight: 550;
+}
+.viewer-slow-actions button:first-child {
+  border-color: color-mix(in srgb, var(--blue) 55%, transparent);
+  background: color-mix(in srgb, var(--blue) 28%, transparent);
+}
+.viewer-slow-actions button:active { opacity: 0.75; }
+.viewer-slow-actions button[hidden] { display: none; }
+
 /* ---------- 云台方向盘 ---------- */
 .ptz-pad {
   position: absolute;
@@ -1464,6 +1543,8 @@ body.wall .wall-exit { display: grid; }
     background-color: rgba(7, 12, 19, 0.78);
   }
   .ptz-btn { border-radius: 12px; }
+  .viewer-slow-card { padding: 20px 16px 16px; }
+  .viewer-slow-actions button { height: var(--m-touch); }
   .ptz-btn .ic { width: 17px; height: 17px; }
   .ptz-toggle {
     left: calc(var(--m-pad) + 2px);
