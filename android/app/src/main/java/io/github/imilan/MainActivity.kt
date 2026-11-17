@@ -70,6 +70,7 @@ class MainActivity : Activity() {
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setupEdgeToEdge()
         applySystemBarInsets()
+        applyDarkChrome(isNightMode())
         askNotificationPermission()
 
         setupWebView()
@@ -136,16 +137,43 @@ class MainActivity : Activity() {
 
     /**
      * manifest 里把 uiMode 交给 Activity 自己处理，切系统深浅色时页面不会重建。
-     * 这里手动同步「壳的底色」和「网页的自动模式」，否则要杀进程重开才跟得上。
+     * 这里手动同步三件事：壳的底色、系统栏图标的明暗、网页的「自动」模式，
+     * 否则要杀进程重开才跟得上。
      */
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         val night = (newConfig.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
             Configuration.UI_MODE_NIGHT_YES
+        applyDarkChrome(night)
         if (::web.isInitialized) {
             web.setBackgroundColor(Color.parseColor(if (night) "#0E1726" else "#EDF2F7"))
-            web.evaluateJavascript("window.__imiResyncTheme && window.__imiResyncTheme()", null)
+            // WebView 的 prefers-color-scheme 在「自己处理 uiMode」时不一定跟着变，
+            // 所以把壳的判定直接推给网页，网页拿这个值时会优先于 matchMedia。
+            web.evaluateJavascript(
+                "window.__imiSetSystemDark && window.__imiSetSystemDark(" +
+                    (if (night) "true" else "false") + ");" +
+                    "window.__imiResyncTheme && window.__imiResyncTheme()",
+                null,
+            )
         }
+    }
+
+    /**
+     * 深色底要浅色图标、浅色底要深色图标。Activity 不重建，主题里的
+     * windowLightStatusBar 不会重新解析，只能在这里手动翻。
+     */
+    @Suppress("DEPRECATION")
+    private fun applyDarkChrome(night: Boolean) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val light = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
+                WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+            window.insetsController?.setSystemBarsAppearance(if (night) 0 else light, light)
+            return
+        }
+        val lightFlag = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+        var flags = window.decorView.systemUiVisibility
+        flags = if (night) flags and lightFlag.inv() else flags or lightFlag
+        window.decorView.systemUiVisibility = flags
     }
 
     private fun setupWebView() {
@@ -315,6 +343,13 @@ class MainActivity : Activity() {
                 if (on) hideSystemBars() else showSystemBars()
             }
         }
+
+        /**
+         * 网页「外观 → 自动」直接问壳要系统深浅色。configChanges 接管 uiMode 之后
+         * WebView 的 prefers-color-scheme 可能一直停在旧值，靠它判断会看着像没生效。
+         */
+        @JavascriptInterface
+        fun isNightMode(): Boolean = this@MainActivity.isNightMode()
     }
 
     inner class ImiChromeClient : WebChromeClient() {

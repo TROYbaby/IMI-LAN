@@ -317,7 +317,19 @@ function themeMode() {
 
 // 安卓 WebView 里 prefers-color-scheme 不一定可靠：改系统深色模式时页面不会重建，
 // change 事件也未必往网页派发。所以读数统一走这里，并在多个时机主动重算。
+// 优先级：壳的推送 > 壳的桥 > matchMedia。壳接管 uiMode 后 WebView 的
+// prefers-color-scheme 可能停在旧值，所以启动时经 IMIShell 问一次，切系统主题时由壳推。
+let shellDark = null;
+
 function systemPrefersDark() {
+  if (shellDark !== null) return shellDark;
+  try {
+    const bridge = window.IMIShell;
+    if (bridge && typeof bridge.isNightMode === 'function') {
+      const v = bridge.isNightMode();
+      if (typeof v === 'boolean') return v;
+    }
+  } catch (_) { /* 桌面浏览器没有桥，走下面的 matchMedia */ }
   try { return matchMedia('(prefers-color-scheme: dark)').matches; } catch (_) { return false; }
 }
 
@@ -368,6 +380,11 @@ function resyncAutoTheme() {
 // 安卓壳声明了 uiMode 变化由自己处理（configChanges 含 uiMode），页面不会重建。
 // 切系统深浅色时壳会主动调这个函数，让自动模式立刻跟上。
 window.__imiResyncTheme = resyncAutoTheme;
+// 壳在系统深浅色变化时推过来；传 null（或非布尔）表示交回 matchMedia 自己判断。
+window.__imiSetSystemDark = (v) => {
+  shellDark = typeof v === 'boolean' ? v : null;
+  resyncAutoTheme();
+};
 
 function cycleTheme() {
   const order = ['auto', 'light', 'dark'];
