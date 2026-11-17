@@ -1214,7 +1214,7 @@ body.wall .wall-exit { display: grid; }
     max-height: 88dvh;
     border: 0;
     border-radius: 20px 20px 0 0;
-    padding: 26px 18px calc(18px + var(--safe-b));
+    padding: 26px 18px calc(28px + var(--safe-b));
     box-shadow: 0 -20px 60px rgba(0, 0, 0, 0.45);
     animation: sheetUp 0.24s cubic-bezier(0.32, 0.72, 0, 1) both;
   }
@@ -1233,6 +1233,9 @@ body.wall .wall-exit { display: grid; }
   .drawer-head { padding-right: 42px; }
   .drawer-head h2 { font-size: 20px; }
   .drawer-body { margin-top: 16px; }
+  /* 抽屉内部自己滚，别把滚动传给背后的页面；底部多留一截，最后一行不会卡在屏幕边缘 */
+  .drawer-panel { overscroll-behavior: contain; scroll-padding-bottom: 24px; }
+  .drawer-body { padding-bottom: 8px; }
   .set-sec { padding: 16px 0; }
   .btn { min-height: var(--m-touch); }
   .settings-list .settings-row { padding: 14px 0; }
@@ -1356,3 +1359,123 @@ body.wall .wall-exit { display: grid; }
 /* 兜底：任何情况下都不允许整页横向溢出（溢出即变成整屏拖动） */
 .shell { overflow: hidden; }
 .stage, .stage-body { min-width: 0; }
+
+/* ---------- 云台方向盘 ---------- */
+.ptz-pad {
+  position: absolute;
+  left: 18px;
+  bottom: 74px;
+  z-index: 4;
+  width: 138px;
+  height: 138px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(3, 1fr);
+  gap: 2px;
+  padding: 6px;
+  border-radius: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  /* 方向盘永远叠在视频上，用固定的深色玻璃 + 浅色图标；
+     跟着主题变会变成“浅色主题下深底深字”，两边都看不清 */
+  background: rgba(7, 12, 19, 0.72);
+  color: #eef4fb;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(14px);
+  opacity: 0.94;
+  transition: opacity 0.18s ease;
+}
+.ptz-pad[hidden] { display: none; }
+.ptz-pad:active { opacity: 1; }
+.ptz-btn {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  /* 继承方向盘固定的浅色，别用 --text：浅色主题下会变成深色箭头贴在深底上 */
+  color: inherit;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.ptz-btn .ic { width: 15px; height: 15px; opacity: 0.95; }
+.ptz-btn:active,
+.ptz-btn.on { background: color-mix(in srgb, var(--blue) 26%, transparent); }
+.ptz-btn.on .ic,
+.ptz-btn:active .ic { opacity: 1; }
+/* 默认朝上，按方向旋转；斜向按钮在型号不支持时由 JS 直接隐藏 */
+.ptz-btn[data-move="up"] .ic { transform: rotate(0deg); }
+.ptz-btn[data-move="right_up"] .ic { transform: rotate(45deg); }
+.ptz-btn[data-move="right"] .ic { transform: rotate(90deg); }
+.ptz-btn[data-move="right_down"] .ic { transform: rotate(135deg); }
+.ptz-btn[data-move="down"] .ic { transform: rotate(180deg); }
+.ptz-btn[data-move="left_down"] .ic { transform: rotate(225deg); }
+.ptz-btn[data-move="left"] .ic { transform: rotate(270deg); }
+.ptz-btn[data-move="left_up"] .ic { transform: rotate(315deg); }
+.ptz-hub {
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  -webkit-tap-highlight-color: transparent;
+}
+.ptz-hub i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.34);
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+.ptz-pad.busy .ptz-hub i {
+  background: var(--blue-2);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--blue) 30%, transparent);
+}
+.ptz-toggle {
+  position: absolute;
+  left: 18px;
+  bottom: 74px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 17px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(7, 12, 19, 0.72);
+  color: #eef4fb;
+  font-size: 11px;
+  backdrop-filter: blur(14px);
+}
+.ptz-toggle[hidden] { display: none; }
+.ptz-toggle .ic { width: 13px; height: 13px; opacity: 0.8; }
+
+@media (max-width: 600px) {
+  .ptz-pad {
+    left: calc(var(--m-pad) + 2px);
+    bottom: calc(64px + var(--safe-b));
+    width: 152px;
+    height: 152px;
+    border-radius: 22px;
+    /* 手机上叠在解码中的视频上，去掉实时模糊，省掉逐帧合成 */
+    backdrop-filter: none;
+    background-color: rgba(7, 12, 19, 0.78);
+  }
+  .ptz-btn { border-radius: 12px; }
+  .ptz-btn .ic { width: 17px; height: 17px; }
+  .ptz-toggle {
+    left: calc(var(--m-pad) + 2px);
+    bottom: calc(64px + var(--safe-b));
+    height: var(--m-touch);
+    padding: 0 14px;
+    border-radius: 22px;
+    font-size: 12px;
+    backdrop-filter: none;
+    background-color: rgba(7, 12, 19, 0.78);
+  }
+}
+
+/* ---------- 设置项说明文字 ---------- */
+.set-hint { margin: 9px 0 0; color: var(--dim); font-size: 10.5px; line-height: 1.55; }

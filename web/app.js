@@ -286,10 +286,35 @@ function themeMode() {
   return state.settings.theme || 'auto';
 }
 
+// 安卓 WebView 里 prefers-color-scheme 不一定可靠：改系统深色模式时页面不会重建，
+// change 事件也未必往网页派发。所以读数统一走这里，并在多个时机主动重算。
+function systemPrefersDark() {
+  try { return matchMedia('(prefers-color-scheme: dark)').matches; } catch (_) { return false; }
+}
+
+function resolvedDark(mode) {
+  if (mode === 'dark') return true;
+  if (mode === 'light') return false;
+  return systemPrefersDark();
+}
+
+// 自动模式下把系统读数写回设置面板：读得对不对一眼就能看出来，不用猜。
+function updateThemeHint(mode = themeMode(), dark = resolvedDark(mode)) {
+  const el = $('#themeHint');
+  if (!el) return;
+  if (mode === 'auto') {
+    el.textContent = `自动：跟随手机的深色模式（当前判定为${dark ? '深色' : '浅色'}）`;
+  } else if (mode === 'light') {
+    el.textContent = '始终使用亮色，不跟随手机';
+  } else {
+    el.textContent = '始终使用深色，不跟随手机';
+  }
+}
+
 function applyTheme(mode, persist = true) {
   state.settings.theme = mode;
   if (persist) saveSettings();
-  const dark = mode === 'dark' || (mode === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
+  const dark = resolvedDark(mode);
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
   const btn = $('#btnTheme');
   if (btn) {
@@ -297,7 +322,23 @@ function applyTheme(mode, persist = true) {
     btn.title = `主题：${mode === 'auto' ? '跟随系统' : mode === 'light' ? '亮色' : '暗色'}（点击切换）`;
   }
   $$('#themeSeg [data-theme]').forEach(b => b.classList.toggle('on', b.dataset.theme === mode));
+  updateThemeHint(mode, dark);
 }
+
+// 回到前台 / 页面重新可见 / 窗口获焦时重算一次自动主题，
+// 弥补 WebView 不派发 prefers-color-scheme change 的情况。
+function resyncAutoTheme() {
+  if (themeMode() !== 'auto') return;
+  if (document.documentElement.dataset.theme !== (systemPrefersDark() ? 'dark' : 'light')) {
+    applyTheme('auto', false);
+  } else {
+    updateThemeHint();
+  }
+}
+
+// 安卓壳声明了 uiMode 变化由自己处理（configChanges 含 uiMode），页面不会重建。
+// 切系统深浅色时壳会主动调这个函数，让自动模式立刻跟上。
+window.__imiResyncTheme = resyncAutoTheme;
 
 function cycleTheme() {
   const order = ['auto', 'light', 'dark'];
@@ -1860,6 +1901,8 @@ function openViewer(name) {
 
   renderViewerChips();
   tickClock();
+  // 云台：只有 /ptz/spec 报告该型号支持时才会显示方向盘
+  ptzProbe(name);
 
   $('#modalViewer').classList.remove('chrome-off');
   $('#modalViewer').classList.add('open');
@@ -1904,6 +1947,7 @@ function closeViewer() {
 
   releaseCardsForViewer();
   setRecUI(false);
+  ptzReset();
 }
 
 // 单画面里单击画面：隐藏/显示顶部和底部控件（右上角菜单一起收起）
@@ -2719,6 +2763,8 @@ function openSettings() {
   $('#setBgSleep').checked = state.settings.bgSleep !== false;
   $('#modalSettings').classList.add('open');
   $('#modalSettings').setAttribute('aria-hidden', 'false');
+  // 打开设置就重算一次外观判定，顺带把读数刷新出来
+  resyncAutoTheme();
   document.body.style.overflow = 'hidden';
 }
 
@@ -3282,6 +3328,147 @@ async function init() {
   window.addEventListener('resize', () => fitGrid(state.cards.size));
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
     if (themeMode() === 'auto') applyTheme('auto', false);
+  });
+  // WebView 不派发 change 时的兜底
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) resyncAutoTheme(); });
+  window.addEventListener('pageshow', resyncAutoTheme);
+  window.addEventListener('focus', resyncAutoTheme);
+  ptzBind();
+}
+
+/* ------------------------------------------------------------------ */
+/* 云台（PTZ）                                                          */
+/* ------------------------------------------------------------------ */
+
+// 只在与网关同源时可用：APK / fnOS 版网关以 -qr 启动，才会注册 /ptz。
+// 桌面版和 NAS 代理模式下 /ptz/spec 返回 404，方向盘自动不出现。
+const ptz = {
+  did: '',
+  dirs: [],
+  model: '',
+  note: '',
+  probing: 0,
+  pressTimer: 0,
+  repeatTimer: 0,
+  lastErrorAt: 0,
+};
+
+function ptzReset() {
+  ptz.probing++;
+  ptz.did = '';
+  ptz.dirs = [];
+  ptz.model = '';
+  ptz.note = '';
+  clearTimeout(ptz.pressTimer);
+  clearInterval(ptz.repeatTimer);
+  ptz.pressTimer = ptz.repeatTimer = 0;
+  ptzRender();
+}
+
+function ptzRender() {
+  const pad = $('#ptzPad');
+  const toggle = $('#ptzToggle');
+  if (!pad || !toggle) return;
+  const supported = ptz.dirs.length >= 4;
+  const collapsed = supported && state.settings.ptzHidden === ptz.did;
+  pad.hidden = !supported || collapsed;
+  toggle.hidden = !supported || !collapsed;
+  if (!supported) return;
+  // 斜向不是所有型号都有对应取值，规格里没有的直接不显示
+  $$('.ptz-btn', pad).forEach(btn => {
+    btn.hidden = !ptz.dirs.includes(btn.dataset.move);
+  });
+}
+
+async function ptzProbe(name) {
+  ptz.probing++;
+  ptz.did = name ? streamDid(name) : '';
+  ptz.dirs = [];
+  ptz.model = '';
+  ptz.note = '';
+  ptzRender();
+  if (!ptz.did) return;
+
+  const seq = ptz.probing;
+  const q = new URLSearchParams({ did: ptz.did, region: state.region || 'cn' });
+  if (state.user) q.set('id', state.user);
+  try {
+    const res = await fetch('/ptz/spec?' + q.toString(), { cache: 'no-store' });
+    if (seq !== ptz.probing) return;            // 已经切到别的摄像头了
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.ok) return;
+    ptz.model = data.model || '';
+    ptz.note = data.spec?.note || '';
+    ptz.dirs = Array.isArray(data.spec?.dirs) ? data.spec.dirs : [];
+  } catch {
+  }
+  if (seq === ptz.probing) ptzRender();
+}
+
+async function ptzMove(dir) {
+  if (!ptz.did) return;
+  const pad = $('#ptzPad');
+  const q = new URLSearchParams({ did: ptz.did, move: dir, region: state.region || 'cn' });
+  if (state.user) q.set('id', state.user);
+  pad?.classList.add('busy');
+  try {
+    const res = await fetch('/ptz?' + q.toString(), { cache: 'no-store' });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+    haptic(8);
+  } catch (e) {
+    // 长按会连续发指令，失败只提示一次，避免刷屏
+    if (Date.now() - ptz.lastErrorAt > 4000) {
+      ptz.lastErrorAt = Date.now();
+      toast('云台：' + e.message, true);
+    }
+  } finally {
+    pad?.classList.remove('busy');
+  }
+}
+
+function ptzBind() {
+  const pad = $('#ptzPad');
+  const toggle = $('#ptzToggle');
+  const collapse = $('#ptzCollapse');
+  if (!pad) return;
+
+  const stop = () => {
+    clearTimeout(ptz.pressTimer);
+    clearInterval(ptz.repeatTimer);
+    ptz.pressTimer = ptz.repeatTimer = 0;
+    $$('.ptz-btn.on', pad).forEach(b => b.classList.remove('on'));
+  };
+
+  pad.addEventListener('pointerdown', e => {
+    const btn = e.target.closest('.ptz-btn');
+    if (!btn || btn.hidden) return;
+    e.preventDefault();
+    try { btn.setPointerCapture(e.pointerId); } catch {}
+    const dir = btn.dataset.move;
+    btn.classList.add('on');
+    haptic(10);
+    ptzMove(dir);
+    clearTimeout(ptz.pressTimer);
+    clearInterval(ptz.repeatTimer);
+    // 长按连续转：先等 420ms（避免轻点被当成两下），之后每 340ms 补一帧
+    ptz.pressTimer = setTimeout(() => {
+      ptz.repeatTimer = setInterval(() => ptzMove(dir), 340);
+    }, 420);
+  });
+  ['pointerup', 'pointercancel', 'pointerleave', 'lostpointercapture']
+    .forEach(ev => pad.addEventListener(ev, stop));
+  pad.addEventListener('contextmenu', e => e.preventDefault());
+
+  toggle?.addEventListener('click', () => {
+    state.settings.ptzHidden = '';
+    saveSettings();
+    ptzRender();
+  });
+  collapse?.addEventListener('click', () => {
+    state.settings.ptzHidden = ptz.did;
+    saveSettings();
+    ptzRender();
   });
 }
 

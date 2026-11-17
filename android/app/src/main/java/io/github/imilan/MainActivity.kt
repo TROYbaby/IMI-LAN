@@ -5,6 +5,7 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
@@ -129,9 +130,28 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun isNightMode(): Boolean =
+        (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
+
+    /**
+     * manifest 里把 uiMode 交给 Activity 自己处理，切系统深浅色时页面不会重建。
+     * 这里手动同步「壳的底色」和「网页的自动模式」，否则要杀进程重开才跟得上。
+     */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val night = (newConfig.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
+        if (::web.isInitialized) {
+            web.setBackgroundColor(Color.parseColor(if (night) "#0E1726" else "#EDF2F7"))
+            web.evaluateJavascript("window.__imiResyncTheme && window.__imiResyncTheme()", null)
+        }
+    }
+
     private fun setupWebView() {
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
-        web.setBackgroundColor(Color.parseColor("#0E1726"))
+        // 底色跟着当前主题走，否则浅色模式下网页加载瞬间会闪一块深蓝
+        web.setBackgroundColor(Color.parseColor(if (isNightMode()) "#0E1726" else "#EDF2F7"))
         web.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true

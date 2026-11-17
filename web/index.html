@@ -52,7 +52,7 @@ try {
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
 } catch {}
 </script>
-<link rel="stylesheet" href="style.css?v=20261116c">
+<link rel="stylesheet" href="style.css?v=20261117a">
 </head>
 <body>
 
@@ -163,6 +163,8 @@ try {
   </symbol>
   <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
   <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <!-- 云台方向三角：默认朝上，靠 CSS 按 data-move 旋转 -->
+  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M12 5l6.5 9h-13z" fill="currentColor"/></symbol>
   <symbol id="i-more" viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.5" fill="currentColor"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/><circle cx="18" cy="12" r="1.5" fill="currentColor"/></symbol>
   <symbol id="i-sun" viewBox="0 0 24 24">
     <circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.6"/>
@@ -286,6 +288,22 @@ try {
     <button data-q="sd">流畅</button>
   </div>
 
+  <!-- 云台方向盘：只在 /ptz/spec 报告该型号支持云台时出现 -->
+  <div class="ptz-pad" id="ptzPad" hidden aria-label="云台方向键">
+    <button class="ptz-btn" data-move="left_up" aria-label="左上"><svg class="ic"><use href="#i-arrow"/></svg></button>
+    <button class="ptz-btn" data-move="up" aria-label="上"><svg class="ic"><use href="#i-arrow"/></svg></button>
+    <button class="ptz-btn" data-move="right_up" aria-label="右上"><svg class="ic"><use href="#i-arrow"/></svg></button>
+    <button class="ptz-btn" data-move="left" aria-label="左"><svg class="ic"><use href="#i-arrow"/></svg></button>
+    <button class="ptz-hub" id="ptzCollapse" aria-label="收起云台方向盘"><i></i></button>
+    <button class="ptz-btn" data-move="right" aria-label="右"><svg class="ic"><use href="#i-arrow"/></svg></button>
+    <button class="ptz-btn" data-move="left_down" aria-label="左下"><svg class="ic"><use href="#i-arrow"/></svg></button>
+    <button class="ptz-btn" data-move="down" aria-label="下"><svg class="ic"><use href="#i-arrow"/></svg></button>
+    <button class="ptz-btn" data-move="right_down" aria-label="右下"><svg class="ic"><use href="#i-arrow"/></svg></button>
+  </div>
+  <button class="ptz-toggle" id="ptzToggle" hidden aria-label="显示云台方向键">
+    <svg class="ic"><use href="#i-camera"/></svg><span>云台</span>
+  </button>
+
   <div class="viewer-bottom">
     <span class="viewer-hint">← → 切换 · 数字键直达 · Esc 退出</span>
     <div class="viewer-chips" id="viewerChips"></div>
@@ -405,6 +423,8 @@ try {
           <button data-theme="light">亮色</button>
           <button data-theme="dark">暗色</button>
         </div>
+        <!-- 自动模式的实际读数：安卓 WebView 读不到系统深色设置时，一眼就能看出来 -->
+        <p class="set-hint" id="themeHint">自动：跟随手机的深色模式</p>
       </section>
 
       <section class="set-sec">
@@ -467,6 +487,6 @@ try {
 </button>
 
 <script type="module" src="video-stream.js?v=20261114f"></script>
-<script type="module" src="app.js?v=20261116c"></script>
+<script type="module" src="app.js?v=20261117a"></script>
 </body>
 </html>
