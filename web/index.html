@@ -52,7 +52,7 @@ try {
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
 } catch {}
 </script>
-<link rel="stylesheet" href="style.css?v=20261117b">
+<link rel="stylesheet" href="style.css?v=20261117d">
 </head>
 <body>
 
@@ -162,6 +162,8 @@ try {
     <path d="M5 7h14M9 7V5h6v2M7 7l1 12h8l1-12M10 10v6M14 10v6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
   </symbol>
   <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M16 16l4.6 4.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
   <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   <!-- 云台方向三角：默认朝上，靠 CSS 按 data-move 旋转 -->
   <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M12 5l6.5 9h-13z" fill="currentColor"/></symbol>
@@ -410,9 +412,26 @@ try {
           </div>
           <button class="btn ghost small" id="btnRelogin">换账号</button>
         </div>
+
+        <div class="pick-toolbar" id="pickToolbar" hidden>
+          <span class="pick-count" id="pickCount">已选 0 / 0</span>
+          <div class="pick-actions">
+            <button type="button" class="btn ghost small" id="btnPickAll">全选</button>
+            <button type="button" class="btn ghost small" id="btnPickNone">清空</button>
+          </div>
+        </div>
+
+        <div class="pick-search" id="pickSearchWrap" hidden>
+          <svg class="ic"><use href="#i-search"/></svg>
+          <input id="pickSearch" type="search" inputmode="search" autocomplete="off" placeholder="搜索名称、IP 或型号">
+        </div>
+
         <div class="device-list" id="deviceList"></div>
+        <div class="pick-empty" id="pickEmpty" hidden>没有匹配的摄像头</div>
         <div class="form-status" id="devicesStatus"></div>
-        <button class="btn primary wide" id="btnAddSelected">添加选中摄像头</button>
+        <div class="pick-footer">
+          <button class="btn primary wide" id="btnAddSelected">添加选中摄像头</button>
+        </div>
       </div>
     </div>
   </div>
@@ -517,6 +536,6 @@ try {
 </button>
 
 <script type="module" src="video-stream.js?v=20261114f"></script>
-<script type="module" src="app.js?v=20261117c"></script>
+<script type="module" src="app.js?v=20261117d"></script>
 </body>
 </html>

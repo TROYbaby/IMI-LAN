@@ -145,7 +145,9 @@ class MainActivity : Activity() {
         super.onConfigurationChanged(newConfig)
         val night = (newConfig.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
             Configuration.UI_MODE_NIGHT_YES
-        applyDarkChrome(night)
+        // 已经挂上网页时不要自己算：网页若是「手动暗色」，推过去之后它会用
+        // setDarkChrome 回推真实外观，这里先按系统算反而会闪一帧错误底色。
+        if (!loaded) applyDarkChrome(night)
         if (::web.isInitialized) {
             // WebView 的 prefers-color-scheme 在「自己处理 uiMode」时不一定跟着变，
             // 所以把壳的判定直接推给网页，网页拿这个值时会优先于 matchMedia。
@@ -366,6 +368,16 @@ class MainActivity : Activity() {
          */
         @JavascriptInterface
         fun isNightMode(): Boolean = this@MainActivity.isNightMode()
+
+        /**
+         * 网页按「实际生效的外观」通知壳换底色。
+         * 网页里手动选「暗色」时手机还是浅色模式，壳只按 isNightMode() 判断会把
+         * 状态栏那条留成白色，和暗色页面拼在一起非常割裂——真机反馈的就是这个。
+         */
+        @JavascriptInterface
+        fun setDarkChrome(night: Boolean) {
+            runOnUiThread { applyDarkChrome(night) }
+        }
     }
 
     inner class ImiChromeClient : WebChromeClient() {

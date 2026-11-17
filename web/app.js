@@ -388,6 +388,18 @@ function updateThemeHint(mode = themeMode(), dark = resolvedDark(mode)) {
   }
 }
 
+/**
+ * 壳的窗口底色与系统栏图标跟着「实际生效的外观」走，而不是跟着系统深浅色。
+ * 手动选暗色时手机还是浅色模式，壳只按 isNightMode() 判断会把状态栏那条留成
+ * 白色，和暗色页面拼在一起非常割裂。所以每次应用主题都通知壳一次。
+ */
+function syncShellChrome(dark) {
+  try {
+    const bridge = window.IMIShell;
+    if (bridge && typeof bridge.setDarkChrome === 'function') bridge.setDarkChrome(!!dark);
+  } catch (_) { /* 桌面浏览器 / 旧版壳没有这个桥 */ }
+}
+
 function applyTheme(mode, persist = true) {
   state.settings.theme = mode;
   if (persist) saveSettings();
@@ -400,6 +412,7 @@ function applyTheme(mode, persist = true) {
   }
   $$('#themeSeg [data-theme]').forEach(b => b.classList.toggle('on', b.dataset.theme === mode));
   updateThemeHint(mode, dark);
+  syncShellChrome(dark);
 }
 
 // 回到前台 / 页面重新可见 / 窗口获焦时重算一次自动主题，
@@ -2779,12 +2792,54 @@ function mergeDeviceMeta(sources) {
   if (changed) saveMeta();
 }
 
+function pickRows() {
+  return $$('#deviceList .device');
+}
+
+function pickBoxOf(row) {
+  return row ? $('.device-box', row) : null;
+}
+
+function pickVisible() {
+  return pickRows().filter(r => !r.classList.contains('pick-hide'));
+}
+
+function syncPickRow(row) {
+  const box = pickBoxOf(row);
+  if (box) row.classList.toggle('on', !!box.checked);
+}
+
+// 搜索只改变「看得见哪些」，不改变已勾选集合：先全选再搜出来取消几个，
+// 是这页最常见的用法，过滤时把勾选清掉会让人白选一遍。
+function applyPickFilter() {
+  const input = $('#pickSearch');
+  const q = (input ? input.value : '').trim().toLowerCase();
+  for (const row of pickRows()) {
+    const hit = !q || (row.dataset.search || '').toLowerCase().includes(q);
+    row.classList.toggle('pick-hide', !hit);
+  }
+  const empty = $('#pickEmpty');
+  if (empty) empty.hidden = !(pickRows().length > 0 && pickVisible().length === 0);
+  updateAddButton();
+}
+
 function renderDevices(sources) {
   const box = $('#deviceList');
   box.innerHTML = '';
 
+  const search = $('#pickSearch');
+  if (search) search.value = '';
+  const toolbar = $('#pickToolbar');
+  // 设备少的时候不摆全选/搜索，省两行空间
+  if (toolbar) toolbar.hidden = sources.length === 0;
+  const searchWrap = $('#pickSearchWrap');
+  if (searchWrap) searchWrap.hidden = sources.length < 5;
+  const empty = $('#pickEmpty');
+  if (empty) empty.hidden = true;
+
   if (!sources.length) {
-    box.innerHTML = '<div class="muted" style="padding:18px;text-align:center">没有摄像头</div>';
+    box.innerHTML = '<div class="pick-empty">这个账号下没有摄像头</div>';
+    updateAddButton();
     return;
   }
 
@@ -2795,19 +2850,29 @@ function renderDevices(sources) {
     const model = u.searchParams.get('model') || '';
     const name = 'cam_' + (did || Math.random().toString(36).slice(2, 8));
     const added = !!state.meta[name] || !!state.streams[name];
+    const title = source.name || '未命名摄像头';
+    const sub = [ip, model].filter(Boolean).join(' · ');
 
     const row = document.createElement('label');
     row.className = 'device';
+    // 名称 / IP / 型号都能搜到；型号用全名，短名会搜不着
+    row.dataset.search = [title, ip, model, name].join(' ');
     row.innerHTML = `
-      <input type="checkbox" ${added ? '' : 'checked'} value="${escapeHTML(name)}">
-      <div class="device-text">
-        <b>${escapeHTML(source.name || '未命名摄像头')}</b>
-        <span>${escapeHTML([ip, shortModel(model)].filter(Boolean).join(' · '))}</span>
-      </div>
-      <span class="tag ${added ? 'added' : ''}">${added ? '已添加' : escapeHTML(shortModel(model))}</span>
+      <input type="checkbox" class="device-box" ${added ? '' : 'checked'} value="${escapeHTML(name)}">
+      <span class="device-tick"><svg class="ic"><use href="#i-check"/></svg></span>
+      <span class="device-text">
+        <b>${escapeHTML(title)}</b>
+        <span class="device-sub">${escapeHTML(sub || '地址未知')}</span>
+      </span>
+      ${added ? '<span class="device-badge">已添加</span>' : ''}
     `;
     row.dataset.source = JSON.stringify({ ...source, did, ip, mac, streamName: name });
-    row.querySelector('input').addEventListener('change', updateAddButton);
+    const input = $('.device-box', row);
+    input.addEventListener('change', () => {
+      syncPickRow(row);
+      updateAddButton();
+    });
+    syncPickRow(row);
     box.appendChild(row);
   }
 
@@ -2815,9 +2880,30 @@ function renderDevices(sources) {
 }
 
 function updateAddButton() {
-  const checked = $$('#deviceList input:checked').length;
-  $('#btnAddSelected').disabled = checked === 0;
-  $('#btnAddSelected').textContent = checked ? `添加选中摄像头（${checked}）` : '添加选中摄像头';
+  const rows = pickRows();
+  const boxes = rows.map(pickBoxOf).filter(Boolean);
+  const checked = boxes.filter(b => b.checked).length;
+
+  const btn = $('#btnAddSelected');
+  if (btn) {
+    btn.disabled = checked === 0;
+    btn.textContent = checked ? `添加选中摄像头（${checked}）` : '添加选中摄像头';
+  }
+
+  const count = $('#pickCount');
+  if (count) count.textContent = `已选 ${checked} / ${rows.length}`;
+
+  // 全选只作用于当前可见（搜索过滤后）的行，文字跟着状态变，省一次点击
+  const allBtn = $('#btnPickAll');
+  if (allBtn) {
+    const vis = pickVisible().map(pickBoxOf).filter(Boolean);
+    const allOn = vis.length > 0 && vis.every(b => b.checked);
+    allBtn.textContent = allOn ? '全不选' : '全选';
+    allBtn.disabled = vis.length === 0;
+  }
+
+  const noneBtn = $('#btnPickNone');
+  if (noneBtn) noneBtn.disabled = checked === 0;
 }
 
 async function addSelected() {
@@ -3208,6 +3294,22 @@ function bindEvents() {
   });
 
   $('#btnAddSelected').addEventListener('click', addSelected);
+  $('#btnPickAll').addEventListener('click', () => {
+    const vis = pickVisible().map(pickBoxOf).filter(Boolean);
+    const allOn = vis.length > 0 && vis.every(b => b.checked);
+    vis.forEach(b => { b.checked = !allOn; });
+    pickRows().forEach(syncPickRow);
+    updateAddButton();
+  });
+  $('#btnPickNone').addEventListener('click', () => {
+    pickRows().forEach(row => {
+      const b = pickBoxOf(row);
+      if (b) b.checked = false;
+    });
+    pickRows().forEach(syncPickRow);
+    updateAddButton();
+  });
+  $('#pickSearch').addEventListener('input', applyPickFilter);
   $('#btnRelogin').addEventListener('click', () => {
     state.user = '';
     localStorage.removeItem('imi.user');
