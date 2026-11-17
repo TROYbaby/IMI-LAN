@@ -459,21 +459,28 @@ try {
       </section>
 
       <section class="set-sec">
-        <label class="set-label">画面比例</label>
-        <div class="seg" id="displaySeg" role="group" aria-label="画面比例">
-          <button data-display="ratio">16:9</button>
-          <button data-display="fill">铺满</button>
+        <label class="set-label">窗口比例</label>
+        <div class="seg" id="boxSeg" role="group" aria-label="窗口比例">
+          <button data-box="auto">自适应</button>
+          <button data-box="16:9">16:9</button>
+          <button data-box="4:3">4:3</button>
         </div>
-        <select id="setDisplay" hidden>
-          <option value="ratio">保持 16:9（不裁切）</option>
-          <option value="fill">铺满窗口（可能裁切）</option>
-        </select>
+        <p class="set-hint">自适应＝每格随窗口拉伸；选 16:9 / 4:3 则整格按该比例排布，画面更大但格子之间会留边</p>
+      </section>
+
+      <section class="set-sec">
+        <label class="set-label">填充方式</label>
+        <div class="seg" id="fitSeg" role="group" aria-label="填充方式">
+          <button data-fit="cover">铺满</button>
+          <button data-fit="contain">完整</button>
+        </div>
+        <p class="set-hint">镜头比格子更宽时，「铺满」会裁掉两侧边缘，「完整」整幅显示、上下或左右留黑边</p>
       </section>
 
       <div class="settings-list">
-        <div class="settings-row"><span>引擎版本</span><b id="setVersion">—</b></div>
-        <div class="settings-row"><span>当前账号</span><b id="setUser">—</b></div>
-        <div class="settings-row"><span>账号区域</span><b id="setRegion">—</b></div>
+        <div class="settings-row"><span>引擎版本</span><b id="setVersion" class="copyable" title="点击复制">—</b></div>
+        <div class="settings-row"><span>当前账号</span><b id="setUser" class="copyable" title="点击复制">—</b></div>
+        <div class="settings-row"><span>账号区域</span><b id="setRegion" class="copyable" title="点击复制">—</b></div>
         <div class="settings-row"><span>过滤门铃/电池设备</span>
           <label class="switch"><input type="checkbox" id="setHideBattery"> 隐藏</label>
         </div>
@@ -489,6 +496,15 @@ try {
         <button class="btn ghost" id="btnReimport">重新读取设备</button>
         <button class="btn danger" id="btnClear">清空所有摄像头</button>
       </div>
+
+      <div class="settings-list">
+        <div class="settings-row"><span>上游项目</span>
+          <a href="https://github.com/pigstrong9/IMI-LAN" target="_blank" rel="noopener">github.com/pigstrong9/IMI-LAN</a>
+        </div>
+        <div class="settings-row"><span>开源许可</span>
+          <a href="https://github.com/pigstrong9/IMI-LAN/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
+        </div>
+      </div>
       <p class="muted small">每次建立新连接时，需要联网向小米云端获取一次摄像头密钥；音视频本身走局域网，不经过公网。</p>
     </div>
   </aside>
@@ -501,6 +517,6 @@ try {
 </button>
 
 <script type="module" src="video-stream.js?v=20261114f"></script>
-<script type="module" src="app.js?v=20261117b"></script>
+<script type="module" src="app.js?v=20261117c"></script>
 </body>
 </html>

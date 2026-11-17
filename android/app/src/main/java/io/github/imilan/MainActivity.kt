@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -146,7 +147,6 @@ class MainActivity : Activity() {
             Configuration.UI_MODE_NIGHT_YES
         applyDarkChrome(night)
         if (::web.isInitialized) {
-            web.setBackgroundColor(Color.parseColor(if (night) "#0E1726" else "#EDF2F7"))
             // WebView 的 prefers-color-scheme 在「自己处理 uiMode」时不一定跟着变，
             // 所以把壳的判定直接推给网页，网页拿这个值时会优先于 matchMedia。
             web.evaluateJavascript(
@@ -159,11 +159,27 @@ class MainActivity : Activity() {
     }
 
     /**
-     * 深色底要浅色图标、浅色底要深色图标。Activity 不重建，主题里的
-     * windowLightStatusBar 不会重新解析，只能在这里手动翻。
+     * 深色底要浅色图标、浅色底要深色图标，并且状态栏下面那条底色也要跟着换。
+     *
+     * 那条底色的真实来源是 Activity 的 window 背景 + layout 根布局的
+     * android:background（都是 @color/splash_background）。Activity 不重建时
+     * 这两处资源都还是切换前的取值，于是真机上会出现「页面底色变了、手机状态栏没变」。
+     * 所以这里把 window / root / WebView 的底色一起显式覆盖，图标明暗另外翻。
      */
     @Suppress("DEPRECATION")
     private fun applyDarkChrome(night: Boolean) {
+        val bg = Color.parseColor(if (night) "#071018" else "#EDF2F7")
+        window.setBackgroundDrawable(ColorDrawable(bg))
+        window.statusBarColor = bg
+        window.navigationBarColor = bg
+        if (::root.isInitialized) {
+            root.setBackgroundColor(bg)
+            overlay.setBackgroundColor(bg)
+            status.setTextColor(Color.parseColor(if (night) "#E6EEF8" else "#162233"))
+        }
+        if (::web.isInitialized) {
+            web.setBackgroundColor(bg)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             val light = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
                 WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS

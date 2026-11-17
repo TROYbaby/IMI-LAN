@@ -18,7 +18,7 @@ const state = {
   devices: [],
   viewer: null,          // {name, player, recorder, microphone}
   paused: new Set(loadJSON('imi.paused', [])),   // 用户手动暂停的摄像头
-  settings: { layout: '1x1', gridLayout: '2x2', scope: 'room', display: 'fill', hideBattery: true, keepAlive: true, bgSleep: true, theme: 'auto', roomLayouts: {}, ...loadJSON('imi.settings', {}) },
+  settings: { layout: '1x1', gridLayout: '2x2', scope: 'room', display: 'fill', box: 'auto', fit: 'cover', hideBattery: true, keepAlive: true, bgSleep: true, theme: 'auto', roomLayouts: {}, ...loadJSON('imi.settings', {}) },
   streamUrls: {},        // name -> 配置里的流地址（/api/streams 激活后不含 url）
   roomData: cachedRooms(), // 本地助手 /rooms 返回的米家房间与设备映射（启动时先用上次缓存）
 };
@@ -110,6 +110,42 @@ function stillOf(name) {
 
 function saveMeta() {
   localStorage.setItem('imi.meta', JSON.stringify(state.meta));
+}
+
+/**
+ * 复制一段文字。安卓 WebView 里 navigator.clipboard 只在部分版本可用，
+ * 失败就退回 textarea + execCommand，这条路在 WebView 里一直是通的。
+ */
+function copyText(text, label) {
+  const value = (text || '').trim();
+  if (!value || value === '—') {
+    toast('暂无可复制的内容', true);
+    return;
+  }
+  const done = () => toast(`${label}已复制`);
+  const legacy = () => {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = value;
+      ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, value.length);
+      document.execCommand('copy');
+      ta.remove();
+      done();
+    } catch (_) {
+      toast('复制失败，可长按选中手动复制', true);
+    }
+  };
+  try {
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(value).then(done, legacy);
+      return;
+    }
+  } catch (_) { /* 落到 legacy */ }
+  legacy();
 }
 
 function toast(message, isError = false) {
@@ -403,9 +439,21 @@ function updateLayoutUI() {
   if (sel) sel.value = layout;
   const tools = $('#gridTools');
   if (tools) tools.hidden = layout === '1x1';
-  const dsel = $('#setDisplay');
-  if (dsel) dsel.value = state.settings.display === 'fill' ? 'fill' : 'ratio';
-  $$('#displaySeg [data-display]').forEach(b => b.classList.toggle('on', b.dataset.display === (state.settings.display === 'fill' ? 'fill' : 'ratio')));
+  const box = state.settings.box || 'auto';
+  const fit = state.settings.fit || 'cover';
+  $$('#boxSeg [data-box]').forEach(b => b.classList.toggle('on', b.dataset.box === box));
+  $$('#fitSeg [data-fit]').forEach(b => b.classList.toggle('on', b.dataset.fit === fit));
+}
+
+/**
+ * 切换「填充方式」时已连上的播放器不会重建（重建就要重新握手、画面闪一下），
+ * 所以直接把 object-fit 改到现有 video 上；之后新建的播放器仍走 makePlayer 的选项。
+ */
+function applyFitLive() {
+  const fit = state.settings.fit === 'contain' ? 'contain' : 'cover';
+  document.querySelectorAll('.card-media video, #viewerStage video').forEach((v) => {
+    v.style.objectFit = fit;
+  });
 }
 
 function closeLayoutMenu() {
@@ -485,8 +533,16 @@ function layoutSpec() {
   return LAYOUTS[state.settings.layout] || LAYOUTS['2x2'];
 }
 
-// 首页布局要同时满足：媒体区 16:9、不裁剪、尽量铺满窗口。
+// 首页布局要同时满足：媒体区按所选比例、不裁剪、尽量铺满窗口。
 // 宽度受限时按宽度算；高度受限时按高度反推卡片宽度，再整体居中。
+/** 「窗口比例」的数值形式；自适应（auto）返回 0，表示由窗口决定。 */
+function boxAspect() {
+  const box = state.settings.box || 'auto';
+  if (box === '4:3') return 4 / 3;
+  if (box === '16:9') return 16 / 9;
+  return 0;
+}
+
 function fitGrid(count) {
   const grid = $('#grid');
   if (document.body.classList.contains('wall')) return;
@@ -504,10 +560,11 @@ function fitGrid(count) {
   if (!availW || !availH) return;
 
   const rows = spec.limit ? Math.ceil(spec.limit / cols) : Math.max(1, Math.ceil(count / cols));
+  const ar = boxAspect(); // 16:9 或 4:3，自适应布局不会走到这里
   const byWidth = (availW - gap * (cols - 1)) / cols;
-  const byHeight = (availH - gap * (rows - 1)) / rows * 16 / 9;
+  const byHeight = (availH - gap * (rows - 1)) / rows * ar;
   const width = Math.max(200, Math.floor(Math.min(byWidth, byHeight)));
-  const rowH = Math.ceil((width - 2) * 9 / 16);
+  const rowH = Math.ceil((width - 2) / ar);
   grid.style.setProperty('--grid-card-w', width + 'px');
   grid.style.setProperty('--grid-row-h', rowH + 'px');
 }
@@ -908,7 +965,7 @@ async function refreshStreams() {
   // 会强制整页重排一次；视频正在解码时就是肉眼可见的周期性卡顿。
   // 布局与可见集合都没变化时直接跳过，只做不产生重排的轻量更新。
   const gridSig = [
-    state.settings.layout, state.settings.display, cols, rows,
+    state.settings.layout, state.settings.box, state.settings.fit, cols, rows,
     visible.join('|'), allNames.length, spec.limit || 0,
     // 卡片数量也要进签名：清空 / 删除一路会先销毁卡片再回来重建，
     // 只比对 names 与布局的话会漏掉这一种，导致画面空白。
@@ -942,7 +999,10 @@ async function refreshStreams() {
   grid.dataset.layout = state.settings.layout;
   grid.classList.toggle('single', single);
   grid.classList.toggle('fit', !single && state.settings.layout !== 'all');
-  grid.classList.toggle('fill', state.settings.display === 'fill');
+  // 「自适应」＝格子随窗口铺满（原来的「铺满窗口」）；16:9 / 4:3 则按比例排布
+  const ar = boxAspect();
+  grid.classList.toggle('fill', ar === 0);
+  grid.style.setProperty('--card-ar', ar === 4 / 3 ? '4 / 3' : '16 / 9');
 
   const hiddenCount = allNames.length - visible.length;
   $('#streamCount').textContent = hiddenCount
@@ -1472,7 +1532,8 @@ function createCard(name, delay = 0) {
     setSignal(0, '正在连接…');
 
     player = makePlayer(name, {
-      contain: false,
+      // 卡片里的视频按「填充方式」铺：铺满=裁切填满，完整=整幅显示留黑边
+      contain: state.settings.fit === 'contain',
       muted: state.muted,
       followGlobalMute: true,
       holdWhileViewer: true,
@@ -1947,7 +2008,7 @@ function openViewer(name) {
   let player;
   try {
     player = makePlayer(name, {
-      contain: state.settings.display === 'ratio',
+      contain: state.settings.fit === 'contain',
       muted: initialMuted,
       microphone: false,
       onReady: () => {
@@ -2132,7 +2193,7 @@ function recreateViewerPlayer({ microphone } = {}) {
   viewer.zoom = null;
   const name = viewer.name;
   const player = makePlayer(name, {
-    contain: state.settings.display === 'ratio',
+    contain: state.settings.fit === 'contain',
     muted: wasMuted,
     microphone: microphone ?? viewer.microphone,
     onReady: () => {
@@ -2175,7 +2236,7 @@ function resumeViewerFromBackground() {
   if (!viewer || !viewer.bgSuspended) return;
   const muted = viewer.muted ?? state.muted;
   const player = makePlayer(viewer.name, {
-    contain: state.settings.display === 'ratio',
+    contain: state.settings.fit === 'contain',
     muted,
     microphone: viewer.microphone || false,
   });
@@ -2942,7 +3003,6 @@ function openSettings() {
   updateLayoutUI();
   applyTheme(themeMode(), false);
   $('#setLayout').value = LAYOUTS[state.settings.layout] ? state.settings.layout : '2x2';
-  $('#setDisplay').value = state.settings.display === 'fill' ? 'fill' : 'ratio';
   $('#setHideBattery').checked = state.settings.hideBattery !== false;
   $('#setKeepAlive').checked = state.settings.keepAlive !== false;
   $('#setBgSleep').checked = state.settings.bgSleep !== false;
@@ -3021,13 +3081,28 @@ function bindEvents() {
   $$('#themeSeg [data-theme]').forEach(btn => {
     btn.addEventListener('click', () => applyTheme(btn.dataset.theme));
   });
-  $$('#displaySeg [data-display]').forEach(btn => {
+  $$('#boxSeg [data-box]').forEach(btn => {
     btn.addEventListener('click', () => {
-      state.settings.display = btn.dataset.display === 'fill' ? 'fill' : 'ratio';
+      state.settings.box = btn.dataset.box;
+      // 自适应不需要黑边，切过去时把填充一起归位，省得用户再点一次
+      if (state.settings.box !== 'auto') state.settings.fit = 'cover';
       saveSettings();
       updateLayoutUI();
+      applyFitLive();
       refreshStreams();
     });
+  });
+  $$('#fitSeg [data-fit]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.settings.fit = btn.dataset.fit;
+      saveSettings();
+      updateLayoutUI();
+      applyFitLive();
+      refreshStreams();
+    });
+  });
+  [['#setVersion', '引擎版本'], ['#setUser', '账号'], ['#setRegion', '区域']].forEach(([sel, label]) => {
+    $(sel)?.addEventListener('click', () => copyText($(sel).textContent, label));
   });
 
   $('#roomList').addEventListener('click', ev => {
@@ -3155,12 +3230,6 @@ function bindEvents() {
   $('#singleSelect').addEventListener('change', () => {
     state.settings.single = $('#singleSelect').value;
     saveSettings();
-    refreshStreams();
-  });
-  $('#setDisplay').addEventListener('change', () => {
-    state.settings.display = $('#setDisplay').value === 'fill' ? 'fill' : 'ratio';
-    saveSettings();
-    updateLayoutUI();
     refreshStreams();
   });
   $('#setHideBattery').addEventListener('change', () => {
@@ -3479,6 +3548,16 @@ async function init() {
     state.settings.scope = 'room';
     state.settings.display = 'fill';
     state.settings.uiVersion = 2;
+    saveSettings();
+  }
+
+  // uiVersion 3：把「画面比例」拆成两个独立概念。老语义里 16:9 一直连着「不裁切」、
+  // 铺满连着「自适应」，按原样迁移过来，用户升级后看到的画面不变。
+  if (savedSettings.uiVersion !== 3) {
+    const wasRatio = state.settings.display === 'ratio';
+    state.settings.box = wasRatio ? '16:9' : 'auto';
+    state.settings.fit = wasRatio ? 'contain' : 'cover';
+    state.settings.uiVersion = 3;
     saveSettings();
   }
 

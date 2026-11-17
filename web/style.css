@@ -429,7 +429,8 @@ body.wall .grid { grid-template-rows: none !important; }
 
 .card-media {
   position: relative;
-  aspect-ratio: 16 / 9;
+  /* 由 JS 按「窗口比例」写入；自适应布局下这条被子网格的 flex 规则覆盖 */
+  aspect-ratio: var(--card-ar, 16 / 9);
   background: #04080d;
   overflow: hidden;
 }
@@ -1560,3 +1561,16 @@ body.wall .wall-exit { display: grid; }
 
 /* ---------- 设置项说明文字 ---------- */
 .set-hint { margin: 9px 0 0; color: var(--dim); font-size: 10.5px; line-height: 1.55; }
+
+/* ---------- 设置项：可复制值与外部链接 ---------- */
+/* 版本号/账号这类值需要能被用户取走反馈问题：可选中，点一下复制 */
+.settings-row b.copyable {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: pointer;
+  border-bottom: 1px dashed var(--line-2);
+  padding-bottom: 1px;
+}
+.settings-row b.copyable:active { color: var(--blue); border-bottom-color: var(--blue); }
+.settings-row a { color: var(--blue); font-weight: 500; text-decoration: none; }
+.settings-row a:active { opacity: 0.65; }
