@@ -3726,25 +3726,51 @@ async function init() {
 // 只在与网关同源时可用：APK / fnOS 版网关以 -qr 启动，才会注册 /ptz。
 // 桌面版和 NAS 代理模式下 /ptz/spec 返回 404，方向盘自动不出现。
 const ptz = {
+  name: '',        // go2rtc 的流名，命令靠它定位到哪台摄像机
   did: '',
   dirs: [],
   model: '',
+  channel: '',     // miss = 视频连接里的命令通道；cloud = MIoT 云端
   note: '',
   probing: 0,
   pressTimer: 0,
   repeatTimer: 0,
+  holdTimer: 0,
   lastErrorAt: 0,
 };
 
+// 长按上限：手指滑出屏幕没收到 pointerup 时，靠它保证电机不会一直转。
+const PTZ_HOLD_MAX = 15000;
+// 按住时的补发间隔。命令本身是「持续朝该方向转」，补发不会加速；
+// 万一某个固件把它当步进，700ms 一步也不至于堆积（约 1.4s 是
+// 「命令发出 → 画面真的动」的延迟，不是步进间隔）。
+const PTZ_REPEAT_MS = 700;
+
+// 让电机停下来。切画面、收起方向盘、松手都要走这里。
+function ptzSendStop(name) {
+  const target = name || ptz.name;
+  if (!target || ptz.channel !== 'miss') return;
+  const q = new URLSearchParams({ name: target, move: 'stop', region: state.region || 'cn' });
+  if (ptz.did) q.set('did', ptz.did);
+  if (state.user) q.set('id', state.user);
+  // 不 await：这是收尾动作，失败也不该阻塞切画面
+  fetch('/ptz?' + q.toString(), { cache: 'no-store', keepalive: true }).catch(() => {});
+}
+
 function ptzReset() {
+  const wasOn = $$('.ptz-btn.on', $('#ptzPad')).length > 0;
+  if (wasOn) ptzSendStop();
   ptz.probing++;
+  ptz.name = '';
   ptz.did = '';
   ptz.dirs = [];
   ptz.model = '';
+  ptz.channel = '';
   ptz.note = '';
   clearTimeout(ptz.pressTimer);
   clearInterval(ptz.repeatTimer);
-  ptz.pressTimer = ptz.repeatTimer = 0;
+  clearTimeout(ptz.holdTimer);
+  ptz.pressTimer = ptz.repeatTimer = ptz.holdTimer = 0;
   ptzRender();
 }
 
@@ -3753,7 +3779,8 @@ function ptzRender() {
   const toggle = $('#ptzToggle');
   if (!pad || !toggle) return;
   const supported = ptz.dirs.length >= 4;
-  const collapsed = supported && state.settings.ptzHidden === ptz.did;
+  const key = ptz.did || ptz.name;
+  const collapsed = supported && key && state.settings.ptzHidden === key;
   pad.hidden = !supported || collapsed;
   toggle.hidden = !supported || !collapsed;
   if (!supported) return;
@@ -3767,15 +3794,18 @@ const ptzWarned = new Set();   // 同一型号只提示一次，别反复弹
 
 async function ptzProbe(name) {
   ptz.probing++;
+  ptz.name = name || '';
   ptz.did = name ? streamDid(name) : '';
   ptz.dirs = [];
   ptz.model = '';
+  ptz.channel = '';
   ptz.note = '';
   ptzRender();
-  if (!ptz.did) return;
+  if (!ptz.name) return;
 
   const seq = ptz.probing;
-  const q = new URLSearchParams({ did: ptz.did, region: state.region || 'cn' });
+  const q = new URLSearchParams({ name: ptz.name, region: state.region || 'cn' });
+  if (ptz.did) q.set('did', ptz.did);
   if (state.user) q.set('id', state.user);
   try {
     const res = await fetch('/ptz/spec?' + q.toString(), { cache: 'no-store' });
@@ -3785,22 +3815,20 @@ async function ptzProbe(name) {
     const spec = data.spec || {};
     ptz.model = data.model || '';
     ptz.note = spec.note || '';
-    // 只有网关在公开规格里真的解析到云台动作才算支持；
-    // 只认得「这台是云台机」但没有可用动作时，不亮方向盘（否则每次都失败）。
+    ptz.channel = spec.channel || '';
+    // 后端已经按通道算过 supported：规格里有云台动作走云端，
+    // 没有则走视频连接里的命令通道（这批摄像机的真实路径）。
     ptz.dirs = spec.supported && Array.isArray(spec.dirs) ? spec.dirs : [];
-    if (!ptz.dirs.length && spec.ptzCapable && !ptzWarned.has(ptz.model)) {
-      ptzWarned.add(ptz.model);
-      toast('这台是云台机，但当前播放引擎不支持云台命令，方向盘先隐藏了', true);
-    }
   } catch {
   }
   if (seq === ptz.probing) ptzRender();
 }
 
 async function ptzMove(dir) {
-  if (!ptz.did) return;
+  if (!ptz.name) return;
   const pad = $('#ptzPad');
-  const q = new URLSearchParams({ did: ptz.did, move: dir, region: state.region || 'cn' });
+  const q = new URLSearchParams({ name: ptz.name, move: dir, region: state.region || 'cn' });
+  if (ptz.did) q.set('did', ptz.did);
   if (state.user) q.set('id', state.user);
   pad?.classList.add('busy');
   try {
@@ -3825,28 +3853,45 @@ function ptzBind() {
   const collapse = $('#ptzCollapse');
   if (!pad) return;
 
+  // 松手要补一条停止：0x112 的 operation 1..4 在多数固件上是
+  // 「持续朝该方向转」，不补停止会一路转到限位。
   const stop = () => {
+    const had = $$('.ptz-btn.on', pad).length > 0;
     clearTimeout(ptz.pressTimer);
     clearInterval(ptz.repeatTimer);
-    ptz.pressTimer = ptz.repeatTimer = 0;
+    clearTimeout(ptz.holdTimer);
+    ptz.pressTimer = ptz.repeatTimer = ptz.holdTimer = 0;
     $$('.ptz-btn.on', pad).forEach(b => b.classList.remove('on'));
+    if (had) ptzSendStop();
   };
 
   pad.addEventListener('pointerdown', e => {
+    if (e.button !== undefined && e.button > 0) return;
     const btn = e.target.closest('.ptz-btn');
     if (!btn || btn.hidden) return;
     e.preventDefault();
     try { btn.setPointerCapture(e.pointerId); } catch {}
     const dir = btn.dataset.move;
+
+    // 手指从一个方向滑到另一个：先把上一个停掉，否则两个方向会叠在一起
+    $$('.ptz-btn.on', pad).forEach(b => { if (b !== btn) b.classList.remove('on'); });
+    clearTimeout(ptz.pressTimer);
+    clearInterval(ptz.repeatTimer);
+    clearTimeout(ptz.holdTimer);
+
     btn.classList.add('on');
     haptic(10);
     ptzMove(dir);
-    clearTimeout(ptz.pressTimer);
-    clearInterval(ptz.repeatTimer);
-    // 长按连续转：先等 420ms（避免轻点被当成两下），之后每 340ms 补一帧
+
+    // 按住继续转：先等 700ms（轻点只走一下），到点先补一次再起定时器，
+    // 否则第一次要等到 2×700ms 才发，手感像卡住了
     ptz.pressTimer = setTimeout(() => {
-      ptz.repeatTimer = setInterval(() => ptzMove(dir), 340);
-    }, 420);
+      ptzMove(dir);
+      ptz.repeatTimer = setInterval(() => ptzMove(dir), PTZ_REPEAT_MS);
+    }, PTZ_REPEAT_MS);
+
+    // 兜底：手指滑出屏幕时可能收不到 pointerup，别让电机一直转
+    ptz.holdTimer = setTimeout(stop, PTZ_HOLD_MAX);
   });
   ['pointerup', 'pointercancel', 'pointerleave', 'lostpointercapture']
     .forEach(ev => pad.addEventListener(ev, stop));
@@ -3858,7 +3903,7 @@ function ptzBind() {
     ptzRender();
   });
   collapse?.addEventListener('click', () => {
-    state.settings.ptzHidden = ptz.did;
+    state.settings.ptzHidden = ptz.did || ptz.name;
     saveSettings();
     ptzRender();
   });

@@ -1,0 +1,218 @@
+--- a/internal/streams/producer.go
++++ b/internal/streams/producer.go
+@@ -54,6 +54,13 @@
+ 	}
+ }
+ 
++// Conn 返回底层的协议连接，供上层按具体类型断言（云台命令通道等）。
++func (p *Producer) Conn() core.Producer {
++	p.mu.Lock()
++	defer p.mu.Unlock()
++	return p.conn
++}
++
+ func (p *Producer) Dial() error {
+ 	p.mu.Lock()
+ 	defer p.mu.Unlock()
+--- a/internal/streams/stream.go
++++ b/internal/streams/stream.go
+@@ -47,6 +47,18 @@
+ 	}
+ }
+ 
++// Conns 返回当前已连上的底层连接。命令类接口（如小米云台）需要拿到具体的
++// 协议实现，这里不做类型判断，交给调用方断言。
++func (s *Stream) Conns() []core.Producer {
++	conns := make([]core.Producer, 0, len(s.producers))
++	for _, prod := range s.producers {
++		if conn := prod.Conn(); conn != nil {
++			conns = append(conns, conn)
++		}
++	}
++	return conns
++}
++
+ func (s *Stream) Sources() []string {
+ 	sources := make([]string, 0, len(s.producers))
+ 	for _, prod := range s.producers {
+--- a/internal/xiaomi/xiaomi.go
++++ b/internal/xiaomi/xiaomi.go
+@@ -8,6 +8,7 @@
+ 	"fmt"
+ 	"net/http"
+ 	"net/url"
++	"strconv"
+ 	"strings"
+ 	"sync"
+ 
+@@ -51,6 +52,61 @@
+ 	})
+ 
+ 	api.HandleFunc("api/xiaomi", apiXiaomi)
++	api.HandleFunc("api/xiaomi/command", apiCommand)
++}
++
++// commandSender 由 pkg/xiaomi/miss.Producer 实现。
++type commandSender interface {
++	SendCommand(cmd uint32, payload []byte) ([]byte, error)
++}
++
++// apiCommand 把一条原始 MISS 命令发给「正在播放」的小米摄像机，例如云台：
++//
++//	POST /api/xiaomi/command?src=camera1&cmd=0x112&data={"operation":1}
++//
++// operation 1/2/3/4 = 左/右/上/下，-1001 = 停止。摄像头只在视频连接里接受
++// 这类命令，所以 src 必须是当前正在播放的流；没有播放就返回 409。
++func apiCommand(w http.ResponseWriter, r *http.Request) {
++	if r.Method != http.MethodPost {
++		http.Error(w, "", http.StatusMethodNotAllowed)
++		return
++	}
++
++	query := r.URL.Query()
++
++	stream := streams.Get(query.Get("src"))
++	if stream == nil {
++		http.Error(w, "stream not found", http.StatusNotFound)
++		return
++	}
++
++	cmd, err := strconv.ParseUint(query.Get("cmd"), 0, 32)
++	if err != nil {
++		http.Error(w, "wrong cmd", http.StatusBadRequest)
++		return
++	}
++
++	for _, conn := range stream.Conns() {
++		sender, ok := conn.(commandSender)
++		if !ok {
++			continue
++		}
++
++		reply, err := sender.SendCommand(uint32(cmd), []byte(query.Get("data")))
++		if err != nil {
++			http.Error(w, err.Error(), http.StatusInternalServerError)
++			return
++		}
++
++		api.ResponseJSON(w, map[string]any{
++			"ok":    true,
++			"reply": string(reply),
++			"hex":   hex.EncodeToString(reply),
++		})
++		return
++	}
++
++	http.Error(w, "no Xiaomi camera is playing on this stream", http.StatusConflict)
+ }
+ 
+ var log zerolog.Logger
+--- a/pkg/xiaomi/miss/client.go
++++ b/pkg/xiaomi/miss/client.go
+@@ -6,8 +6,10 @@
+ 	"encoding/hex"
+ 	"errors"
+ 	"fmt"
++	"math/bits"
+ 	"net"
+ 	"net/url"
++	"sync"
+ 	"time"
+ 
+ 	"github.com/AlexxIT/go2rtc/pkg/tutk"
+@@ -72,13 +74,22 @@
+ 		return nil, err
+ 	}
+ 
+-	return &Client{Conn: conn, key: key, model: model}, nil
++	client := &Client{Conn: conn, key: key, model: model, replies: make(chan []byte, 16)}
++	// 命令通道必须一直有人读。摄像头会主动往 channel 0 推控制消息（约 10s 一条），
++	// cs2 那边缓冲只有 10 条，满了就判连接失效 —— 在 C700 上表现为每 110 秒
++	// 断流重连一次（日志 "cs2: pop buffer is full"）。登录后就不再读是官方实现
++	// 的缺口。这个 goroutine 同时把回复转交给 SendCommand。
++	go client.readReplies()
++	return client, nil
+ }
+ 
+ type Client struct {
+ 	Conn
+ 	key   []byte
+ 	model string
++
++	replies chan []byte
++	sendMu  sync.Mutex
+ }
+ 
+ const (
+@@ -134,6 +145,56 @@
+ 	return c.Conn.WriteCommand(cmdEncoded, data)
+ }
+ 
++// SendCommand 发一条 MISS 命令（例如云台的 cmdMotorReq）并等一会儿摄像头的回复。
++// 回复必须始终被读走：命令通道缓冲很小，读满连接就会被关掉。
++func (c *Client) SendCommand(cmd uint32, payload []byte, wait time.Duration) ([]byte, error) {
++	c.sendMu.Lock()
++	defer c.sendMu.Unlock()
++
++	// 丢掉上一条超时之后才到的旧回复，否则这次会立刻拿到上一次的结果
++	for len(c.replies) > 0 {
++		<-c.replies
++	}
++
++	data := binary.BigEndian.AppendUint32(nil, cmd)
++	data = append(data, payload...)
++	if err := c.WriteCommand(data); err != nil {
++		return nil, err
++	}
++
++	select {
++	case reply := <-c.replies:
++		return reply, nil
++	case <-time.After(wait):
++		return nil, nil
++	}
++}
++
++// Replies 暴露命令通道上读到的消息（调试用）。
++func (c *Client) Replies() <-chan []byte {
++	return c.replies
++}
++
++func (c *Client) readReplies() {
++	for {
++		cmd, data, err := c.Conn.ReadCommand()
++		if err != nil {
++			return
++		}
++		// 写 cmd 用 BigEndian、读用 LittleEndian，所以两种字节序都要认
++		if (cmd == cmdEncoded || bits.ReverseBytes32(cmd) == cmdEncoded) && len(data) > 8 {
++			if decoded, err := crypto.Decode(data, c.key); err == nil {
++				data = decoded
++			}
++		}
++		select {
++		case c.replies <- data:
++		default:
++			// 没人取就丢，绝不能阻塞在这里 —— 阻塞了通道又会积压
++		}
++	}
++}
++
+ const (
+ 	ModelDafang  = "isa.camera.df3"
+ 	ModelLoockV2 = "loock.cateye.v02"
+--- a/pkg/xiaomi/miss/producer.go
++++ b/pkg/xiaomi/miss/producer.go
+@@ -17,6 +17,12 @@
+ 	client *Client
+ }
+ 
++// SendCommand 在播放过程中给摄像头发一条原始 MISS 命令（云台、变焦等）。
++// 摄像头只接受「正在视频连接里」的命令，所以必须复用已有连接，不能另开一条。
++func (p *Producer) SendCommand(cmd uint32, payload []byte) ([]byte, error) {
++	return p.client.SendCommand(cmd, payload, 2*time.Second)
++}
++
+ func Dial(rawURL string) (core.Producer, error) {
+ 	client, err := NewClient(rawURL)
+ 	if err != nil {

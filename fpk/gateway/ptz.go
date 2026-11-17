@@ -2,12 +2,21 @@ package main
 
 // 云台（PTZ）控制。
 //
-// 米家摄像机的转动走 MIoT 云端 miotspec/action，不需要额外的设备 token：
-// 网关已经持有扫码拿到的 serviceToken + ssecurity，cloudRequest 能直接签名调用。
+// 有两条通道，优先级不同：
 //
-// 各型号云台动作的 siid/aiid/入参 piid 与取值命名并不统一（有的用 "left"，
-// 有的用 "pan_left"，也有用数字枚举的），所以这里先去 miot-spec.org 按型号
-// 拉一次公开规格，把动作和取值解析出来；解析不到再回退到最常见的 2/1/1。
+// 1. miss 命令通道（主路径）—— 转动命令是视频连接里的 MISS 0x112，
+//    带 {"operation":1..4}（1=左 2=右 3=上 4=下），{"operation":-1001} 停止。
+//    官方 go2rtc 只定义了这个常量、没有开放调用，本项目用
+//    fpk/patches/xiaomi-control.patch 补上 POST /api/xiaomi/command。
+//    实测 C700（chuangmi.camera.81ac1）、xiaovv、叮零、母婴看护版这些型号
+//    的公开 MIoT 规格里都**没有**云台动作，真实通道就是这一条。
+//
+// 2. MIoT 云端 miotspec/action（兜底）—— 少数型号的公开规格里确实有云台动作，
+//    这时网关用扫码拿到的 serviceToken + ssecurity 直接签名调用。
+//    各型号的 siid/aiid/piid 与取值命名不统一（"left" / "pan_left" / 数字枚举），
+//    所以先去 miot-spec.org 按型号拉公开规格解析；解析不到再回退 2/1/1。
+//
+// 命令通道必须「画面正在播」才可用：摄像头只在视频连接里接受这类命令。
 
 import (
 	"encoding/json"
@@ -56,8 +65,10 @@ type ptzSpec struct {
 	// 前端据此决定要不要显示方向盘 —— 盲调云端只会让用户以为坏了。
 	Supported bool `json:"supported"`
 	// PTZCapable 表示该型号本身是云台机（规格里有 ptz 相关属性），
-	// 但当前引擎没有可用的控制通道。
+	// 但公开规格里没有可直接调用的云台动作。
 	PTZCapable bool `json:"ptzCapable"`
+	// Channel 是实际可用的控制通道：miss（视频连接里的命令通道）或 cloud（MIoT 云端）。
+	Channel string `json:"channel,omitempty"`
 }
 
 type miotParam struct {
@@ -389,8 +400,103 @@ func (s *qrService) ptzAuth(user, region string) (*cloudAuth, error) {
 
 // ---------------------------------------------------------------- HTTP 路由
 
+// ptzMissOps 是 MISS 0x112 电机命令的 operation 取值：1=左 2=右 3=上 4=下。
+// 云台只有这四个方向，没有斜向 —— 斜向要靠两条命令接力，那就不是「一步」了。
+var ptzMissOps = map[string]int{
+	"left":  1,
+	"right": 2,
+	"up":    3,
+	"down":  4,
+}
+
+const (
+	ptzMissCmd = 0x112
+	// 停止。operation 1..4 在多数固件上是「持续朝该方向转」，不补一条停止会一直转到限位。
+	ptzStopOp = -1001
+)
+
+var ptzMissDirs = []string{"left", "right", "up", "down"}
+
+// missCommand 让 go2rtc 把一条 MISS 命令发到正在播放的摄像机上。
+func (s *qrService) missCommand(src string, cmd uint32, data string) (string, error) {
+	q := url.Values{}
+	q.Set("src", src)
+	q.Set("cmd", fmt.Sprintf("0x%x", cmd))
+	q.Set("data", data)
+
+	req, err := http.NewRequest(http.MethodPost,
+		s.apiBase+"/api/xiaomi/command?"+q.Encode(), nil)
+	if err != nil {
+		return "", err
+	}
+
+	res, err := s.apiClient(6 * time.Second).Do(req)
+	if err != nil {
+		return "", fmt.Errorf("播放引擎没有响应：%v", err)
+	}
+	defer res.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<16))
+
+	switch res.StatusCode {
+	case http.StatusOK:
+	case http.StatusConflict:
+		return "", errors.New("画面还没连上摄像机，等画面出来再控制云台")
+	case http.StatusNotFound:
+		return "", fmt.Errorf("播放引擎里没有「%s」这个画面", src)
+	case http.StatusMethodNotAllowed:
+		return "", errors.New("播放引擎没有云台命令接口，需要装带 xiaomi-control 补丁的版本")
+	default:
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			msg = fmt.Sprintf("播放引擎返回 HTTP %d", res.StatusCode)
+		}
+		return "", errors.New(msg)
+	}
+
+	var out struct {
+		OK    bool   `json:"ok"`
+		Reply string `json:"reply"`
+		Hex   string `json:"hex"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return "", fmt.Errorf("播放引擎返回了看不懂的结果：%v", err)
+	}
+	return out.Reply, nil
+}
+
+// specWithChannel 返回补上通道信息的规格副本。
+// resolvePtzSpec 的结果是带缓存的指针，直接改会把缓存写脏（第二次进来
+// 就会拿到已经「支持」的旧结论）。
+func specWithChannel(model string, spec *ptzSpec) *ptzSpec {
+	var out ptzSpec
+	if spec != nil {
+		out = *spec
+	}
+	out.Model = model
+
+	if out.Supported {
+		out.Channel = "cloud"
+		return &out
+	}
+
+	// 规格里没有云台动作 —— 这正是这批摄像机的常态，改走视频连接里的命令通道。
+	out.Channel = "miss"
+	out.Supported = true
+	out.Source = "miss"
+	out.Action = "MISS 0x112 motor"
+	out.Dirs = ptzMissDirs
+	out.DirVals = nil
+	if out.PTZCapable {
+		out.Note = "该型号是云台机，转动命令走视频连接里的命令通道"
+	} else {
+		out.Note = "转动命令已发给摄像机；画面不动说明这台不是云台机，或者已经到角度极限"
+	}
+	return &out
+}
+
 func (s *qrService) registerPTZ(mux *http.ServeMux) {
-	// 查询某个摄像头是否支持云台、支持哪些方向（前端据此决定要不要显示方向盘）。
+	// 查询某个画面能不能控云台、能控哪些方向（前端据此决定要不要显示方向盘）。
 	mux.HandleFunc("/ptz/spec", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "OPTIONS" {
 			s.cors(w, r)
@@ -409,18 +515,20 @@ func (s *qrService) registerPTZ(mux *http.ServeMux) {
 				break
 			}
 		}
-		if did == "" {
-			s.sendJSON(w, r, 400, map[string]any{"ok": false, "error": "缺少 did"})
-			return
+
+		// 型号只用来把说明写准一点，查不到也不影响走命令通道
+		var model string
+		var spec *ptzSpec
+		if did != "" {
+			if m, err := s.deviceModelOf(user, region, did); err == nil {
+				model = m
+				spec = resolvePtzSpec(model)
+			}
 		}
-		model, err := s.deviceModelOf(user, region, did)
-		if err != nil {
-			s.sendJSON(w, r, 502, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		spec := resolvePtzSpec(model)
+
+		out := specWithChannel(model, spec)
 		s.sendJSON(w, r, 200, map[string]any{
-			"ok": true, "did": did, "model": model, "spec": spec,
+			"ok": true, "did": did, "model": model, "spec": out,
 		})
 	})
 
@@ -431,8 +539,9 @@ func (s *qrService) registerPTZ(mux *http.ServeMux) {
 			return
 		}
 		q := r.URL.Query()
+		name := strings.TrimSpace(q.Get("name"))
 		did := q.Get("did")
-		move := strings.ToLower(q.Get("move"))
+		move := strings.ToLower(strings.TrimSpace(q.Get("move")))
 		region := q.Get("region")
 		if region == "" {
 			region = "cn"
@@ -444,36 +553,56 @@ func (s *qrService) registerPTZ(mux *http.ServeMux) {
 				break
 			}
 		}
-		if did == "" || move == "" {
-			s.sendJSON(w, r, 400, map[string]any{"ok": false, "error": "缺少 did 或 move"})
+		if move == "" {
+			s.sendJSON(w, r, 400, map[string]any{"ok": false, "error": "缺少 move"})
 			return
 		}
 
-		model, err := s.deviceModelOf(user, region, did)
-		if err != nil {
-			s.sendJSON(w, r, 502, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		spec := resolvePtzSpec(model)
-
-		// 公开规格里没有云台动作时，云端 /miotspec/action 一定失败（这批摄像机
-		// 的转动走的是 P2P 视频连接里的 cmd 通道，官方 go2rtc 不开放）。
-		// 与其返回一个看不懂的云端错误，不如直接说明原因。
-		// 显式带 siid/aiid/value 时仍然放行，方便换型号手动试。
-		if !spec.Supported && q.Get("siid") == "" && q.Get("value") == "" {
-			reason := "该型号的公开 MIoT 规格没有云台动作，云端控制通道不可用"
-			if spec.PTZCapable {
-				reason = "这台是云台机，但转动命令走 P2P 通道，当前播放引擎（go2rtc）不开放该通道"
+		var model string
+		var spec *ptzSpec
+		if did != "" {
+			if m, err := s.deviceModelOf(user, region, did); err == nil {
+				model = m
+				spec = resolvePtzSpec(model)
 			}
+		}
+
+		// 1) 命令通道优先：这是这批摄像机的真实路径，只要画面在播就能发。
+		var payload string
+		if move == "stop" {
+			payload = fmt.Sprintf(`{"operation":%d}`, ptzStopOp)
+		} else if op, ok := ptzMissOps[move]; ok {
+			payload = fmt.Sprintf(`{"operation":%d}`, op)
+		}
+
+		var missErr error
+		if name == "" {
+			missErr = errors.New("缺少 name（画面名），命令发不到摄像机")
+		} else if payload == "" {
+			missErr = fmt.Errorf("云台只有上下左右四个方向，没有「%s」", move)
+		} else if reply, err := s.missCommand(name, ptzMissCmd, payload); err == nil {
+			s.infof("ptz %s via miss (name=%s model=%s) reply=%s", move, name, model, reply)
+			s.sendJSON(w, r, 200, map[string]any{
+				"ok": true, "channel": "miss", "name": name, "move": move,
+				"model": model, "data": payload, "reply": reply,
+			})
+			return
+		} else {
+			missErr = err
+		}
+
+		// 2) 兜底：少数型号的公开规格里确实有云台动作，走云端 MIoT。
+		cloudSpec := specWithChannel(model, spec)
+		if cloudSpec.Channel != "cloud" || len(cloudSpec.DirVals) == 0 {
 			s.sendJSON(w, r, 501, map[string]any{
-				"ok": false, "error": reason, "model": model,
-				"ptzCapable": spec.PTZCapable, "supported": false, "note": spec.Note,
+				"ok": false, "error": missErr.Error(), "model": model,
+				"channel": "miss", "dirs": ptzMissDirs, "note": specNote(spec),
 			})
 			return
 		}
 
-		// 允许显式覆盖，方便换型号时不用改代码就能试。
-		siid, aiid, piid := spec.Siid, spec.Aiid, spec.Piid
+		siid, aiid, piid := cloudSpec.Siid, cloudSpec.Aiid, cloudSpec.Piid
+		// 显式带参数时放行，方便换型号手动试
 		if v := q.Get("siid"); v != "" {
 			fmt.Sscanf(v, "%d", &siid)
 		}
@@ -487,12 +616,12 @@ func (s *qrService) registerPTZ(mux *http.ServeMux) {
 		var value any
 		if raw := q.Get("value"); raw != "" {
 			value = raw
-		} else if v, ok := spec.DirVals[move]; ok {
+		} else if v, ok := cloudSpec.DirVals[move]; ok {
 			value = v
 		} else {
 			s.sendJSON(w, r, 400, map[string]any{
 				"ok": false, "error": "该型号没有方向：" + move,
-				"dirs": spec.Dirs, "source": spec.Source, "note": spec.Note,
+				"dirs": cloudSpec.Dirs, "source": cloudSpec.Source, "note": cloudSpec.Note,
 			})
 			return
 		}
@@ -509,17 +638,25 @@ func (s *qrService) registerPTZ(mux *http.ServeMux) {
 		}}}
 		res, err := cloudRequest(auth, region, "/miotspec/action", body)
 		if err != nil {
-			s.infof("ptz %s failed (model=%s siid=%d aiid=%d piid=%d value=%v): %v",
+			s.infof("ptz %s failed (channel=cloud model=%s siid=%d aiid=%d piid=%d value=%v): %v",
 				move, model, siid, aiid, piid, value, err)
 			s.sendJSON(w, r, 502, map[string]any{
-				"ok": false, "error": err.Error(),
+				"ok": false, "error": err.Error(), "channel": "cloud",
 				"model": model, "siid": siid, "aiid": aiid, "piid": piid, "value": value,
+				"missError": missErr.Error(),
 			})
 			return
 		}
 		s.sendJSON(w, r, 200, map[string]any{
-			"ok": true, "model": model, "move": move, "value": value,
+			"ok": true, "channel": "cloud", "model": model, "move": move, "value": value,
 			"siid": siid, "aiid": aiid, "piid": piid, "result": res,
 		})
 	})
+}
+
+func specNote(spec *ptzSpec) string {
+	if spec == nil {
+		return ""
+	}
+	return spec.Note
 }

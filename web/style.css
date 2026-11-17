@@ -757,7 +757,14 @@ body.wall .grid { grid-template-rows: none !important; }
 .viewer-actions { margin-left: auto; display: flex; align-items: center; gap: 3px; padding: 4px; border: 1px solid rgba(255, 255, 255, 0.13); border-radius: 10px; background: rgba(7, 12, 19, 0.58); backdrop-filter: blur(10px); }
 .viewer-actions .icon-btn { color: rgba(255, 255, 255, 0.82); }
 .viewer-actions .icon-btn:hover { background: rgba(255, 255, 255, 0.12); border-color: transparent; color: #fff; }
-.quality-btn { height: 30px; padding: 0 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: rgba(255, 255, 255, 0.82); font-size: 10.5px; }
+.quality-btn {
+  /* 和两侧的 .icon-btn 同高同圆角，否则并排时高矮不齐很明显 */
+  height: 32px; padding: 0 10px;
+  border: 1px solid transparent; border-radius: 8px;
+  background: transparent; color: rgba(255, 255, 255, 0.82);
+  font-size: 11px; font-weight: 500; letter-spacing: 0.01em;
+  display: inline-flex; align-items: center; justify-content: center;
+}
 .quality-btn:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
 
 .quality-menu {
@@ -953,6 +960,10 @@ body.wall .grid { grid-template-rows: none !important; }
 .switch input { width: 14px; height: 14px; accent-color: var(--blue); }
 .settings-actions { display: flex; gap: 7px; flex-wrap: wrap; margin: 14px 0; }
 .drawer-body > .muted { margin: 0; }
+.drawer-body { scrollbar-width: thin; scrollbar-color: var(--line-2) transparent; }
+.drawer-body::-webkit-scrollbar { width: 5px; }
+.drawer-body::-webkit-scrollbar-thumb { border-radius: 3px; background: var(--line-2); }
+.drawer-body::-webkit-scrollbar-track { background: transparent; }
 
 /* ---------- toast / wall ---------- */
 
@@ -1065,7 +1076,7 @@ body.wall .wall-exit { display: grid; }
   .login-tab { padding: 11px 12px; }
   .seg button { height: 34px; }
   .viewer-actions .icon-btn { width: 40px; height: 40px; }
-  .quality-btn { height: 36px; padding: 0 10px; }
+  .quality-btn { height: 40px; padding: 0 11px; }
   .viewer-chips button { height: 30px; padding: 0 11px; }
   .foot-tools button { width: 32px; height: 32px; }
   .device { padding: 13px 13px; border-radius: 14px; }
@@ -1156,6 +1167,8 @@ body.wall .wall-exit { display: grid; }
   .add-btn span { display: none; }
   .icon-btn { width: 36px; height: 36px; border-radius: 10px; }
   .icon-btn .ic { width: 19px; height: 19px; }
+  /* 画质按钮要跟着一起缩，否则和两侧图标高矮不齐 */
+  .quality-btn { height: 36px; padding: 0 10px; }
 
   /* ---------- 主体：画面在上，摄像机条在下 ---------- */
   .app {
@@ -1602,6 +1615,18 @@ body.wall .wall-exit { display: grid; }
 
 /* ---------- 设置项说明文字 ---------- */
 .set-hint { margin: 9px 0 0; color: var(--dim); font-size: 10.5px; line-height: 1.55; }
+/* 两行以上的说明（填充方式、窗口比例）挤成一团不好读：
+   左侧一条竖线把它和上面的控件分开，行距也放松一点 */
+.set-hint.hint-block {
+  /* 不要底色：加了底色就长得像能点的按钮，跟上面的分段控件抢注意力。
+     只留左侧竖线，一眼看出是「对上面这组控件的解释」。 */
+  margin-top: 10px;
+  padding: 1px 0 1px 11px;
+  border-left: 2px solid var(--line-2);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.62;
+}
 
 /* ---------- 设置项：可复制值与外部链接 ---------- */
 /* 版本号/账号这类值需要能被用户取走反馈问题：可选中，点一下复制 */
@@ -1613,5 +1638,12 @@ body.wall .wall-exit { display: grid; }
   padding-bottom: 1px;
 }
 .settings-row b.copyable:active { color: var(--blue); border-bottom-color: var(--blue); }
+/* 版本号是被人逐字读/贴进 issue 的内容：等宽字体 + 等宽数字，比比例字体好认 */
+.settings-row b.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  letter-spacing: -0.01em;
+}
 .settings-row a { color: var(--blue); font-weight: 500; text-decoration: none; }
 .settings-row a:active { opacity: 0.65; }
