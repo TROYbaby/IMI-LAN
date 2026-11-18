@@ -52,7 +52,7 @@ try {
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
 } catch {}
 </script>
-<link rel="stylesheet" href="style.css?v=20261117f">
+<link rel="stylesheet" href="style.css?v=20261118a">
 </head>
 <body>
 
@@ -521,15 +521,15 @@ try {
           <div class="settings-row"><span>引擎版本</span><b id="setVersion" class="copyable mono" title="点击复制">—</b></div>
           <div class="settings-row"><span>当前账号</span><b id="setUser" class="copyable" title="点击复制">—</b></div>
           <div class="settings-row"><span>账号区域</span><b id="setRegion" class="copyable" title="点击复制">—</b></div>
-          <div class="settings-row"><span>过滤门铃/电池设备</span>
-            <label class="switch"><input type="checkbox" id="setHideBattery"> 隐藏</label>
-          </div>
-          <div class="settings-row"><span>后台保持连接</span>
-            <label class="switch"><input type="checkbox" id="setKeepAlive"> 保持</label>
-          </div>
-          <div class="settings-row"><span>后台 2 分钟后休眠</span>
-            <label class="switch"><input type="checkbox" id="setBgSleep"> 开启</label>
-          </div>
+          <label class="settings-row"><span>过滤门铃/电池设备</span>
+            <span class="switch"><input type="checkbox" id="setHideBattery"><i></i></span>
+          </label>
+          <label class="settings-row"><span>后台保持连接</span>
+            <span class="switch"><input type="checkbox" id="setKeepAlive"><i></i></span>
+          </label>
+          <label class="settings-row"><span>后台 2 分钟后休眠</span>
+            <span class="switch"><input type="checkbox" id="setBgSleep"><i></i></span>
+          </label>
         </div>
 
         <div class="settings-actions">
@@ -558,6 +558,6 @@ try {
 </button>
 
 <script type="module" src="video-stream.js?v=20261114f"></script>
-<script type="module" src="app.js?v=20261117f"></script>
+<script type="module" src="app.js?v=20261118a"></script>
 </body>
 </html>
